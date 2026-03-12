@@ -1,0 +1,51 @@
+# Windows
+*.bat
+
+# Build outputs
+android/build/
+android/.gradle/
+android/.cxx/
+android/assets/dotnet_bcl/
+android/local.properties
+android/res/values-*/godot_project_name_string.xml
+android/res/values/godot_project_name_string.xml
+src/patcher/bin/
+src/patcher/obj/
+src/STS2Mobile/bin/
+src/STS2Mobile/obj/
+
+# Large binary files
+*.tar.gz
+*.apk
+*.so
+*.pck
+*.aar
+*.aar.bak*
+*.jar
+*.keystore
+
+# Third-party sources & SDKs
+vendor/
+
+# FMOD logos (proprietary)
+android/assets/FMOD_LOGOS/
+
+# Upstream game files
+upstream/
+
+# Python venv
+venv/
+
+# Logs
+logs.txt
+
+# Hidden directories
+.*
+!.gitignore
+
+# IDE
+*.user
+*.suo
+
+# .NET
+*.nupkg
