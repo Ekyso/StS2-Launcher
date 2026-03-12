@@ -25,9 +25,9 @@ An Android launcher for Slay the Spire 2, built on a custom Godot 4.5.1 engine w
 
 At startup, `STS2Mobile.dll` is loaded via `coreclr_create_delegate` and applies [Harmony](https://github.com/pardeike/Harmony) patches to adapt the desktop game for mobile. The launcher intercepts `GameStartupWrapper()` to present a Steam login screen before the game starts.
 
-**Launcher-only mode**  
-If no game files are present, the app loads a minimal `bootstrap.pck` and shows the launcher UI for Steam login and game download.
-**Normal mode**  
+- **Launcher-only mode**  
+If no game files are present, the app loads a minimal `bootstrap.pck` and shows the launcher UI for Steam login and game download.  
+- **Normal mode**  
 With game files downloaded, all patches apply against `sts2.dll` and the game runs natively after authentication.
 
 ## Engine Patches
