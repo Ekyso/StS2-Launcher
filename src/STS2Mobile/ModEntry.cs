@@ -74,6 +74,7 @@ public static class ModEntry
             EarlyAccessDisclaimerPatches.Apply(_harmony);
             CombatBackgroundPatches.Apply(_harmony);
             LanMultiplayerPatcher.Apply(_harmony);
+            ModLoaderPatches.Apply(_harmony);
             LauncherPatches.Apply(_harmony);
 
             PatchHelper.Log("All game patches applied.");
