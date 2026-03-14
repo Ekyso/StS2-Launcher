@@ -49,3 +49,4 @@ logs.txt
 
 # .NET
 *.nupkg
+patchnotes.md

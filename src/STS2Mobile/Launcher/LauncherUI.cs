@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Threading.Tasks;
 using Godot;
 using STS2Mobile.Patches;
-using STS2Mobile.Steam;
 
 namespace STS2Mobile.Launcher;
 
@@ -15,6 +14,7 @@ public class LauncherUI : Control
     private LauncherModel _model;
     private LauncherView _view;
     private LauncherController _controller;
+    private bool _inGameMode;
 
     public void Initialize()
     {
@@ -28,6 +28,7 @@ public class LauncherUI : Control
             var scale = Math.Max(vpSize.X, vpSize.Y) / 960f;
 
             _model = new LauncherModel(OS.GetDataDir());
+            _model.InGameMode = _inGameMode;
             _view = new LauncherView(this, scale);
             _controller = new LauncherController(_model, _view, a => _mainThreadQueue.Enqueue(a));
 
@@ -49,7 +50,9 @@ public class LauncherUI : Control
         _controller.Start();
     }
 
-    public Task<SteamSession> WaitForLaunch() => _model.WaitForLaunch();
+    public void SetGameMode(bool inGameMode) => _inGameMode = inGameMode;
+
+    public Task WaitForLaunch() => _model.WaitForLaunch();
 
     private void OnProcessFrame()
     {

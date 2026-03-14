@@ -16,6 +16,7 @@ public static class PatchHelper
         string methodName,
         MethodInfo prefix = null,
         MethodInfo postfix = null,
+        MethodInfo transpiler = null,
         BindingFlags flags = AllFlags
     )
     {
@@ -30,7 +31,8 @@ public static class PatchHelper
             harmony.Patch(
                 target,
                 prefix: prefix != null ? new HarmonyMethod(prefix) : null,
-                postfix: postfix != null ? new HarmonyMethod(postfix) : null
+                postfix: postfix != null ? new HarmonyMethod(postfix) : null,
+                transpiler: transpiler != null ? new HarmonyMethod(transpiler) : null
             );
             Log($"Patched {targetType.Name}.{methodName}");
         }
@@ -96,5 +98,11 @@ public static class PatchHelper
     public static MethodInfo Method(Type type, string name) =>
         type.GetMethod(name, BindingFlags.Public | BindingFlags.Static);
 
-    public static void Log(string msg) => Console.Error.WriteLine($"[STS2Mobile] {msg}");
+    public static event Action<string> LogEmitted;
+
+    public static void Log(string msg)
+    {
+        Console.Error.WriteLine($"[STS2Mobile] {msg}");
+        LogEmitted?.Invoke(msg);
+    }
 }

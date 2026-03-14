@@ -76,6 +76,7 @@ public static class ModEntry
             LanMultiplayerPatcher.Apply(_harmony);
             ModLoaderPatches.Apply(_harmony);
             LauncherPatches.Apply(_harmony);
+            SaveDiagnosticPatches.Apply(_harmony);
 
             PatchHelper.Log("All game patches applied.");
         }

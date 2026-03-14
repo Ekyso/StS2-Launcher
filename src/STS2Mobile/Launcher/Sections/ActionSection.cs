@@ -9,11 +9,15 @@ public class ActionSection : VBoxContainer
     public event Action LaunchPressed;
     public event Action RetryPressed;
     public event Action<bool> CloudSyncToggled;
+    public event Action CloudPushPressed;
+    public event Action CloudPullPressed;
     public event Action CheckForUpdatesPressed;
 
     private readonly Button _launchButton;
     private readonly Button _retryButton;
     private readonly StyledButton _cloudSyncToggle;
+    private readonly Button _pushButton;
+    private readonly Button _pullButton;
     private readonly Button _updateButton;
     private readonly StyleBoxFlat _offStyle;
     private readonly StyleBoxFlat _onStyle;
@@ -30,17 +34,33 @@ public class ActionSection : VBoxContainer
         _offStyle = StyledButton.MakeOutline(new Color(0.7f, 0.25f, 0.25f), r, bw);
         _onStyle = StyledButton.MakeOutline(new Color(0.25f, 0.65f, 0.3f), r, bw);
 
-        _cloudSyncToggle = new StyledButton("Cloud Saves: OFF", scale, fontSize: 14, height: 44);
+        _cloudSyncToggle = new StyledButton("Auto Sync: OFF", scale, fontSize: 14, height: 44);
         _cloudSyncToggle.ToggleMode = true;
         _cloudSyncToggle.Visible = false;
         ApplyCloudSyncStyle(false);
         _cloudSyncToggle.Toggled += pressed =>
         {
-            _cloudSyncToggle.Text = pressed ? "Cloud Saves: ON" : "Cloud Saves: OFF";
+            _cloudSyncToggle.Text = pressed ? "Auto Sync: ON" : "Auto Sync: OFF";
             ApplyCloudSyncStyle(pressed);
             CloudSyncToggled?.Invoke(pressed);
         };
         AddChild(_cloudSyncToggle);
+
+        var pushPullRow = new HBoxContainer();
+        pushPullRow.Visible = false;
+        pushPullRow.AddThemeConstantOverride("separation", (int)(6 * scale));
+
+        _pushButton = new StyledButton("Push to Cloud", scale, fontSize: 14, height: 44);
+        _pushButton.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        _pushButton.Pressed += () => CloudPushPressed?.Invoke();
+        pushPullRow.AddChild(_pushButton);
+
+        _pullButton = new StyledButton("Pull from Cloud", scale, fontSize: 14, height: 44);
+        _pullButton.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        _pullButton.Pressed += () => CloudPullPressed?.Invoke();
+        pushPullRow.AddChild(_pullButton);
+
+        AddChild(pushPullRow);
 
         _updateButton = new StyledButton("CHECK FOR UPDATES", scale, fontSize: 16, height: 48);
         _updateButton.Visible = false;
@@ -56,7 +76,7 @@ public class ActionSection : VBoxContainer
     public void SetCloudSyncChecked(bool value)
     {
         _cloudSyncToggle.ButtonPressed = value;
-        _cloudSyncToggle.Text = value ? "Cloud Saves: ON" : "Cloud Saves: OFF";
+        _cloudSyncToggle.Text = value ? "Auto Sync: ON" : "Auto Sync: OFF";
         ApplyCloudSyncStyle(value);
     }
 
@@ -69,11 +89,14 @@ public class ActionSection : VBoxContainer
         _cloudSyncToggle.AddThemeStyleboxOverride("disabled", style);
     }
 
+    private HBoxContainer PushPullRow => (HBoxContainer)_pushButton.GetParent();
+
     public void ShowLaunch(string text, bool showCloudSync, bool showUpdate)
     {
         _launchButton.Text = text;
         _launchButton.Visible = true;
         _cloudSyncToggle.Visible = showCloudSync;
+        PushPullRow.Visible = showCloudSync;
         _updateButton.Visible = showUpdate;
         _updateButton.Disabled = false;
         _updateButton.Text = "CHECK FOR UPDATES";
@@ -85,6 +108,7 @@ public class ActionSection : VBoxContainer
         _retryButton.Visible = true;
         _launchButton.Visible = false;
         _cloudSyncToggle.Visible = false;
+        PushPullRow.Visible = false;
         _updateButton.Visible = false;
     }
 
@@ -93,7 +117,14 @@ public class ActionSection : VBoxContainer
         _launchButton.Visible = false;
         _retryButton.Visible = false;
         _cloudSyncToggle.Visible = false;
+        PushPullRow.Visible = false;
         _updateButton.Visible = false;
+    }
+
+    public void SetPushPullDisabled(bool disabled)
+    {
+        _pushButton.Disabled = disabled;
+        _pullButton.Disabled = disabled;
     }
 
     public void SetUpdateButtonText(string text) => _updateButton.Text = text;

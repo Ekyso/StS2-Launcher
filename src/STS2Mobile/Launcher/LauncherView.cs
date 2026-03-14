@@ -23,6 +23,7 @@ public class LauncherView
     public LauncherView(Control parent, float scale)
     {
         _parent = parent;
+        _scale = scale;
         parent.SetAnchorsPreset(Control.LayoutPreset.FullRect);
 
         var vpSize = parent.GetViewport()?.GetVisibleRect().Size ?? new Vector2(1920, 1080);
@@ -107,6 +108,8 @@ public class LauncherView
         right.AddChild(Log);
     }
 
+    private readonly float _scale;
+
     public void SetStatus(string text) => _statusLabel.Text = text;
 
     public void AppendLog(string msg) => Log.AppendLog(msg);
@@ -165,6 +168,13 @@ public class LauncherView
             PatchHelper.Log($"Failed to load FMOD logo: {ex.Message}");
             return null;
         }
+    }
+
+    public void ShowConfirmation(string message, Action onConfirmed)
+    {
+        var dialog = new StyledDialog(message, _scale);
+        dialog.Confirmed += onConfirmed;
+        _parent.AddChild(dialog);
     }
 
     private void DismissKeyboard(InputEvent ev)

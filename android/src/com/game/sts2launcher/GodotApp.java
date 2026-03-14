@@ -100,8 +100,10 @@ public class GodotApp extends GodotActivity {
 		return true;
 	}
 
-	// Copies .NET BCL from APK assets and game assemblies from the download directory
-	// into the location Godot expects. Skips if already done unless the APK version changed.
+	// Copies .NET BCL from APK assets and game assemblies from the download
+	// directory
+	// into the location Godot expects. Skips if already done unless the APK version
+	// changed.
 	private void setupAssemblies() {
 		File srcDir = findAssembliesDir();
 		File destDir = new File(getFilesDir(), ".godot/mono/publish/arm64");
@@ -127,7 +129,7 @@ public class GodotApp extends GodotActivity {
 				int count = 0;
 				for (String name : bclFiles) {
 					try (InputStream in = getAssets().open("dotnet_bcl/" + name);
-						 OutputStream out = new FileOutputStream(new File(destDir, name))) {
+							OutputStream out = new FileOutputStream(new File(destDir, name))) {
 						byte[] buf = new byte[8192];
 						int len;
 						while ((len = in.read(buf)) > 0) {
@@ -142,7 +144,8 @@ public class GodotApp extends GodotActivity {
 			Log.e(TAG, "Failed to copy BCL assemblies", e);
 		}
 
-		// Only copy game assemblies that don't already exist in BCL. The depot has desktop
+		// Only copy game assemblies that don't already exist in BCL. The depot has
+		// desktop
 		// CoreCLR versions that are incompatible with Android's Mono runtime.
 		if (!srcDir.exists() || !srcDir.isDirectory()) {
 			Log.w(TAG, "Game assemblies source dir not found: " + srcDir.getAbsolutePath());
@@ -151,7 +154,8 @@ public class GodotApp extends GodotActivity {
 
 		Log.i(TAG, "Copying game assemblies from " + srcDir + " to " + destDir);
 		File[] files = srcDir.listFiles();
-		if (files == null) return;
+		if (files == null)
+			return;
 
 		int count = 0;
 		for (File src : files) {
@@ -193,7 +197,7 @@ public class GodotApp extends GodotActivity {
 
 	private void copyFile(File src, File dest) throws IOException {
 		try (InputStream in = new FileInputStream(src);
-			 OutputStream out = new FileOutputStream(dest)) {
+				OutputStream out = new FileOutputStream(dest)) {
 			byte[] buf = new byte[8192];
 			int len;
 			while ((len = in.read(buf)) > 0) {
@@ -205,9 +209,10 @@ public class GodotApp extends GodotActivity {
 	// Extracts a single file from APK assets to the files directory.
 	private void extractAssetFile(String assetPath, String destName) {
 		File dest = new File(getFilesDir(), destName);
-		if (dest.exists()) return;
+		if (dest.exists())
+			return;
 		try (InputStream in = getAssets().open(assetPath);
-			 OutputStream out = new FileOutputStream(dest)) {
+				OutputStream out = new FileOutputStream(dest)) {
 			byte[] buf = new byte[4096];
 			int len;
 			while ((len = in.read(buf)) > 0) {
@@ -227,7 +232,8 @@ public class GodotApp extends GodotActivity {
 			commands.add(pckFile.getAbsolutePath());
 			Log.i(TAG, "Loading PCK from: " + pckFile.getAbsolutePath());
 		} else {
-			// No game files yet; use bootstrap PCK so Godot can initialize for the launcher.
+			// No game files yet; use bootstrap PCK so Godot can initialize for the
+			// launcher.
 			String bootstrapPck = extractBootstrapPck();
 			if (bootstrapPck != null) {
 				commands.add("--main-pack");
@@ -244,7 +250,7 @@ public class GodotApp extends GodotActivity {
 			return dest.getAbsolutePath();
 		}
 		try (InputStream in = getAssets().open("bootstrap.pck");
-			 OutputStream out = new FileOutputStream(dest)) {
+				OutputStream out = new FileOutputStream(dest)) {
 			byte[] buf = new byte[4096];
 			int len;
 			while ((len = in.read(buf)) > 0) {
@@ -307,15 +313,15 @@ public class GodotApp extends GodotActivity {
 		}
 
 		KeyGenerator keyGen = KeyGenerator.getInstance(
-			android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+				android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
 		keyGen.init(new android.security.keystore.KeyGenParameterSpec.Builder(
 				KEYSTORE_ALIAS,
 				android.security.keystore.KeyProperties.PURPOSE_ENCRYPT
-					| android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
-			.setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
-			.setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
-			.setKeySize(256)
-			.build());
+						| android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+				.setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+				.setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+				.setKeySize(256)
+				.build());
 		return keyGen.generateKey();
 	}
 
@@ -356,6 +362,35 @@ public class GodotApp extends GodotActivity {
 		} catch (Exception e) {
 			Log.e(TAG, "Decryption failed", e);
 			return null;
+		}
+	}
+
+	// Returns true if the app has permission to write to shared external storage.
+	public boolean hasStoragePermission() {
+		if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+			return android.os.Environment.isExternalStorageManager();
+		}
+		return checkSelfPermission(
+				android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+	}
+
+	// Requests external storage permission. On Android 11+, opens the system
+	// settings
+	// page for "All files access". On older versions, shows the runtime permission
+	// dialog.
+	public void requestStoragePermission() {
+		if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+			try {
+				Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+				intent.setData(android.net.Uri.parse("package:" + getPackageName()));
+				startActivity(intent);
+			} catch (Exception e) {
+				Log.w(TAG, "Failed to open app-specific storage settings, trying general", e);
+				Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+				startActivity(intent);
+			}
+		} else {
+			requestPermissions(new String[] { android.Manifest.permission.WRITE_EXTERNAL_STORAGE }, 1);
 		}
 	}
 

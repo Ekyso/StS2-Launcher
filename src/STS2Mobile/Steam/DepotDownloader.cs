@@ -30,7 +30,7 @@ public class DepotDownloader : IDisposable
     private const int MaxRetries = 5;
     private const int MaxConcurrentDownloads = 8;
 
-    private readonly SteamSession _session;
+    private readonly SteamConnection _connection;
     private readonly string _gameDir;
     private readonly string _stateDir;
     private readonly Client _cdnClient;
@@ -48,115 +48,131 @@ public class DepotDownloader : IDisposable
     public event Action<DownloadProgress> ProgressChanged;
     public event Action<string> LogMessage;
 
-    public DepotDownloader(SteamSession session, string dataDir)
+    public DepotDownloader(SteamConnection connection, string dataDir)
     {
-        _session = session;
+        _connection = connection;
         _gameDir = Path.Combine(dataDir, "game");
         _stateDir = Path.Combine(dataDir, "download_state");
-        _cdnClient = new Client(session.Client);
+        _cdnClient = new Client(connection.Client);
     }
 
     // Returns true if any depot has a newer manifest than what's cached locally.
     public async Task<bool> CheckForUpdatesAsync(CancellationToken ct = default)
     {
-        Directory.CreateDirectory(_stateDir);
-
-        ulong accessToken = _session.AppAccessToken;
-        var infoResult = await _session.Apps.PICSGetProductInfo(
-            new[] { new SteamApps.PICSRequest(AppId, accessToken) },
-            Enumerable.Empty<SteamApps.PICSRequest>()
-        );
-
-        SteamApps.PICSProductInfoCallback.PICSProductInfo appInfo = null;
-        foreach (var cb in infoResult.Results)
+        _connection.SuspendIdleTimeout();
+        try
         {
-            if (cb.Apps.TryGetValue(AppId, out var info))
+            Directory.CreateDirectory(_stateDir);
+
+            ulong accessToken = _connection.AppAccessToken;
+            var infoResult = await _connection.Apps.PICSGetProductInfo(
+                new[] { new SteamApps.PICSRequest(AppId, accessToken) },
+                Enumerable.Empty<SteamApps.PICSRequest>()
+            );
+
+            SteamApps.PICSProductInfoCallback.PICSProductInfo appInfo = null;
+            foreach (var cb in infoResult.Results)
             {
-                appInfo = info;
-                break;
+                if (cb.Apps.TryGetValue(AppId, out var info))
+                {
+                    appInfo = info;
+                    break;
+                }
             }
+
+            if (appInfo == null)
+                throw new Exception("Failed to get app info from Steam");
+
+            _appInfoCache[AppId] = appInfo;
+            var depots = await ParseDepotsAsync(appInfo.KeyValues["depots"]);
+
+            foreach (var (depotId, manifestId) in depots)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (LoadCachedManifestId(depotId) != manifestId)
+                {
+                    Log($"Update available: depot {depotId} manifest changed");
+                    return true;
+                }
+            }
+
+            Log("Game is up to date");
+            return false;
         }
-
-        if (appInfo == null)
-            throw new Exception("Failed to get app info from Steam");
-
-        _appInfoCache[AppId] = appInfo;
-        var depots = await ParseDepotsAsync(appInfo.KeyValues["depots"]);
-
-        foreach (var (depotId, manifestId) in depots)
+        finally
         {
-            ct.ThrowIfCancellationRequested();
-            if (LoadCachedManifestId(depotId) != manifestId)
-            {
-                Log($"Update available: depot {depotId} manifest changed");
-                return true;
-            }
+            _connection.ResumeIdleTimeout();
         }
-
-        Log("Game is up to date");
-        return false;
     }
 
     public async Task DownloadAsync(CancellationToken ct = default)
     {
-        Directory.CreateDirectory(_gameDir);
-        Directory.CreateDirectory(_stateDir);
-
-        Log("Fetching app info...");
-
-        ulong accessToken = _session.AppAccessToken;
-        var infoResult = await _session.Apps.PICSGetProductInfo(
-            new[] { new SteamApps.PICSRequest(AppId, accessToken) },
-            Enumerable.Empty<SteamApps.PICSRequest>()
-        );
-
-        SteamApps.PICSProductInfoCallback.PICSProductInfo appInfo = null;
-        foreach (var cb in infoResult.Results)
+        _connection.SuspendIdleTimeout();
+        try
         {
-            if (cb.Apps.TryGetValue(AppId, out var info))
+            Directory.CreateDirectory(_gameDir);
+            Directory.CreateDirectory(_stateDir);
+
+            Log("Fetching app info...");
+
+            ulong accessToken = _connection.AppAccessToken;
+            var infoResult = await _connection.Apps.PICSGetProductInfo(
+                new[] { new SteamApps.PICSRequest(AppId, accessToken) },
+                Enumerable.Empty<SteamApps.PICSRequest>()
+            );
+
+            SteamApps.PICSProductInfoCallback.PICSProductInfo appInfo = null;
+            foreach (var cb in infoResult.Results)
             {
-                appInfo = info;
-                break;
+                if (cb.Apps.TryGetValue(AppId, out var info))
+                {
+                    appInfo = info;
+                    break;
+                }
             }
+
+            if (appInfo == null)
+                throw new Exception("Failed to get app info from Steam");
+
+            _appInfoCache[AppId] = appInfo;
+            var depotSection = appInfo.KeyValues["depots"];
+            var depots = await ParseDepotsAsync(depotSection);
+            if (depots.Count == 0)
+                throw new Exception("No downloadable depots found");
+
+            Log("Getting CDN servers...");
+            var allServers = await ContentServerDirectoryService.LoadAsync(
+                _connection.Configuration,
+                ct
+            );
+            if (allServers == null || allServers.Count == 0)
+                throw new Exception("No CDN servers available");
+
+            _servers = allServers
+                .Where(s => s.Type == "SteamCache" || s.Type == "CDN")
+                .OrderBy(s => s.WeightedLoad)
+                .ToList();
+
+            if (_servers.Count == 0)
+                _servers = allServers.ToList();
+
+            Log($"Using {_servers.Count} CDN servers");
+
+            foreach (var (depotId, manifestId) in depots)
+            {
+                ct.ThrowIfCancellationRequested();
+                await DownloadDepotAsync(depotId, manifestId, ct);
+            }
+
+            Log("All game files downloaded!");
+
+            // Remove Sentry plugin references (no android.arm64 build exists).
+            PatchGamePck(Path.Combine(_gameDir, "SlayTheSpire2.pck"));
         }
-
-        if (appInfo == null)
-            throw new Exception("Failed to get app info from Steam");
-
-        _appInfoCache[AppId] = appInfo;
-        var depotSection = appInfo.KeyValues["depots"];
-        var depots = await ParseDepotsAsync(depotSection);
-        if (depots.Count == 0)
-            throw new Exception("No downloadable depots found");
-
-        Log("Getting CDN servers...");
-        var allServers = await ContentServerDirectoryService.LoadAsync(
-            _session.Client.Configuration,
-            ct
-        );
-        if (allServers == null || allServers.Count == 0)
-            throw new Exception("No CDN servers available");
-
-        _servers = allServers
-            .Where(s => s.Type == "SteamCache" || s.Type == "CDN")
-            .OrderBy(s => s.WeightedLoad)
-            .ToList();
-
-        if (_servers.Count == 0)
-            _servers = allServers.ToList();
-
-        Log($"Using {_servers.Count} CDN servers");
-
-        foreach (var (depotId, manifestId) in depots)
+        finally
         {
-            ct.ThrowIfCancellationRequested();
-            await DownloadDepotAsync(depotId, manifestId, ct);
+            _connection.ResumeIdleTimeout();
         }
-
-        Log("All game files downloaded!");
-
-        // Remove Sentry plugin references (no android.arm64 build exists).
-        PatchGamePck(Path.Combine(_gameDir, "SlayTheSpire2.pck"));
     }
 
     private async Task<List<(uint DepotId, ulong ManifestId)>> ParseDepotsAsync(
@@ -230,14 +246,14 @@ public class DepotDownloader : IDisposable
         if (_appInfoCache.TryGetValue(appId, out var cached))
             return cached;
 
-        var tokenResult = await _session.Apps.PICSGetAccessTokens(
+        var tokenResult = await _connection.Apps.PICSGetAccessTokens(
             new[] { appId },
             Enumerable.Empty<uint>()
         );
         ulong token = 0;
         tokenResult.AppTokens?.TryGetValue(appId, out token);
 
-        var infoResult = await _session.Apps.PICSGetProductInfo(
+        var infoResult = await _connection.Apps.PICSGetProductInfo(
             new[] { new SteamApps.PICSRequest(appId, token) },
             Enumerable.Empty<SteamApps.PICSRequest>()
         );
@@ -266,7 +282,7 @@ public class DepotDownloader : IDisposable
         if (_cdnAuthTokens.TryGetValue(key, out var cached))
             return cached;
 
-        var result = await _session.Content.GetCDNAuthToken(AppId, depotId, server.Host);
+        var result = await _connection.Content.GetCDNAuthToken(AppId, depotId, server.Host);
         if (result.Result == EResult.OK)
         {
             _cdnAuthTokens[key] = result.Token;
@@ -286,7 +302,7 @@ public class DepotDownloader : IDisposable
             return cached.Code;
         }
 
-        var code = await _session.Content.GetManifestRequestCode(
+        var code = await _connection.Content.GetManifestRequestCode(
             depotId,
             AppId,
             manifestId,
@@ -306,13 +322,9 @@ public class DepotDownloader : IDisposable
     {
         Log($"Processing depot {depotId}...");
 
-        if (LoadCachedManifestId(depotId) == manifestId)
-        {
-            Log($"Depot {depotId} is up to date");
-            return;
-        }
+        bool isUpdate = LoadCachedManifestId(depotId) != manifestId;
 
-        var keyResult = await _session.Apps.GetDepotDecryptionKey(depotId, AppId);
+        var keyResult = await _connection.Apps.GetDepotDecryptionKey(depotId, AppId);
         if (keyResult.Result != EResult.OK)
             throw new Exception($"Failed to get depot key for {depotId}: {keyResult.Result}");
         var depotKey = keyResult.DepotKey;
@@ -362,7 +374,21 @@ public class DepotDownloader : IDisposable
 
         var oldManifest = LoadCachedManifest(depotId);
 
-        var filesToDownload = GetFilesToDownload(oldManifest, manifest);
+        // Clean up temp files from interrupted previous downloads.
+        foreach (
+            var temp in Directory.GetFiles(_gameDir, "*.downloading", SearchOption.AllDirectories)
+        )
+        {
+            try
+            {
+                File.Delete(temp);
+            }
+            catch { }
+        }
+
+        // Determine which files need downloading: new/changed files from the
+        // manifest diff, plus any existing files that fail on-disk SHA-1 verification.
+        var filesToDownload = GetFilesNeedingDownload(oldManifest, manifest, isUpdate);
         var filesToDelete = GetFilesToDelete(oldManifest, manifest);
 
         foreach (var fileName in filesToDelete)
@@ -448,100 +474,203 @@ public class DepotDownloader : IDisposable
         if (fileDir != null)
             Directory.CreateDirectory(fileDir);
 
-        // Skip files that already match expected size (resume support).
-        if (File.Exists(filePath))
+        // Validate existing file against manifest SHA-1 hash. A size-only check
+        // would miss corruption from interrupted writes (SetLength pre-allocates).
+        if (File.Exists(filePath) && VerifyFileHash(filePath, file))
         {
-            var info = new FileInfo(filePath);
-            if (info.Length == (long)file.TotalSize)
-            {
-                Interlocked.Add(ref _progress.DownloadedBytes, (long)file.TotalSize);
-                ReportProgress();
-                return;
-            }
+            Interlocked.Add(ref _progress.DownloadedBytes, (long)file.TotalSize);
+            ReportProgress();
+            return;
         }
 
-        using var fs = File.Create(filePath);
-        fs.SetLength((long)file.TotalSize);
+        // Write to a temp file, verify hash, then move into place. This prevents
+        // a partially-written file from being mistaken as complete on retry.
+        var tempPath = filePath + ".downloading";
 
-        foreach (var chunk in file.Chunks.OrderBy(c => c.Offset))
+        using (var fs = File.Create(tempPath))
         {
-            ct.ThrowIfCancellationRequested();
-
-            var buffer = new byte[chunk.UncompressedLength];
-            int written = 0;
-
-            for (int attempt = 0; attempt < MaxRetries; attempt++)
+            foreach (var chunk in file.Chunks.OrderBy(c => c.Offset))
             {
-                var server = GetNextServer();
-                try
+                ct.ThrowIfCancellationRequested();
+
+                var buffer = new byte[chunk.UncompressedLength];
+                int written = 0;
+
+                for (int attempt = 0; attempt < MaxRetries; attempt++)
                 {
-                    written = await _cdnClient.DownloadDepotChunkAsync(
-                        depotId,
-                        chunk,
-                        server,
-                        buffer,
-                        depotKey
-                    );
-                    break;
-                }
-                catch (SteamKitWebRequestException ex)
-                    when (ex.StatusCode == HttpStatusCode.Forbidden)
-                {
-                    var token = await GetCdnAuthToken(depotId, server);
-                    if (token != null)
+                    var server = GetNextServer();
+                    try
                     {
                         written = await _cdnClient.DownloadDepotChunkAsync(
                             depotId,
                             chunk,
                             server,
                             buffer,
-                            depotKey,
-                            cdnAuthToken: token
+                            depotKey
                         );
+
+                        if (!VerifyChunkHash(buffer, written, chunk))
+                        {
+                            if (attempt < MaxRetries - 1)
+                            {
+                                Log($"Chunk SHA-1 mismatch at offset {chunk.Offset}, retrying...");
+                                written = 0;
+                                continue;
+                            }
+                            throw new Exception(
+                                $"Chunk SHA-1 verification failed for {fileName} "
+                                    + $"at offset {chunk.Offset} after {MaxRetries} attempts"
+                            );
+                        }
+
                         break;
                     }
+                    catch (SteamKitWebRequestException ex)
+                        when (ex.StatusCode == HttpStatusCode.Forbidden)
+                    {
+                        var token = await GetCdnAuthToken(depotId, server);
+                        if (token != null)
+                        {
+                            written = await _cdnClient.DownloadDepotChunkAsync(
+                                depotId,
+                                chunk,
+                                server,
+                                buffer,
+                                depotKey,
+                                cdnAuthToken: token
+                            );
+
+                            if (!VerifyChunkHash(buffer, written, chunk))
+                            {
+                                if (attempt < MaxRetries - 1)
+                                {
+                                    Log(
+                                        $"Chunk SHA-1 mismatch at offset {chunk.Offset}, retrying..."
+                                    );
+                                    written = 0;
+                                    continue;
+                                }
+                                throw new Exception(
+                                    $"Chunk SHA-1 verification failed for {fileName} "
+                                        + $"at offset {chunk.Offset} after {MaxRetries} attempts"
+                                );
+                            }
+
+                            break;
+                        }
+                    }
+                    catch (Exception ex) when (attempt < MaxRetries - 1)
+                    {
+                        Log($"Chunk download failed (attempt {attempt + 1}): {ex.Message}");
+                    }
                 }
-                catch (Exception ex) when (attempt < MaxRetries - 1)
-                {
-                    Log($"Chunk download failed (attempt {attempt + 1}): {ex.Message}");
-                }
+
+                if (written == 0 && chunk.UncompressedLength > 0)
+                    throw new Exception(
+                        $"Failed to download chunk for {fileName} after {MaxRetries} attempts"
+                    );
+
+                fs.Seek((long)chunk.Offset, SeekOrigin.Begin);
+                fs.Write(buffer, 0, written);
+
+                Interlocked.Add(ref _progress.DownloadedBytes, written);
+                ReportProgress();
             }
+        }
 
-            if (written == 0 && chunk.UncompressedLength > 0)
-                throw new Exception(
-                    $"Failed to download chunk for {fileName} after {MaxRetries} attempts"
-                );
+        // Verify the completed file before committing it.
+        if (!VerifyFileHash(tempPath, file))
+        {
+            File.Delete(tempPath);
+            throw new Exception($"SHA-1 verification failed for {fileName} after download");
+        }
 
-            fs.Seek((long)chunk.Offset, SeekOrigin.Begin);
-            fs.Write(buffer, 0, written);
+        File.Move(tempPath, filePath, overwrite: true);
+    }
 
-            Interlocked.Add(ref _progress.DownloadedBytes, written);
-            ReportProgress();
+    // Computes SHA-1 of a decompressed chunk and compares it to the manifest ChunkID.
+    private static bool VerifyChunkHash(byte[] buffer, int length, DepotManifest.ChunkData chunk)
+    {
+        if (chunk.ChunkID == null || chunk.ChunkID.Length == 0)
+            return true;
+
+        var hash = System.Security.Cryptography.SHA1.HashData(buffer.AsSpan(0, length));
+        return hash.AsSpan().SequenceEqual(chunk.ChunkID);
+    }
+
+    // Computes SHA-1 of a file on disk and compares it to the manifest hash.
+    private static bool VerifyFileHash(string path, DepotManifest.FileData file)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (info.Length != (long)file.TotalSize)
+                return false;
+
+            using var fs = File.OpenRead(path);
+            var hash = System.Security.Cryptography.SHA1.HashData(fs);
+            return hash.AsSpan().SequenceEqual(file.FileHash);
+        }
+        catch
+        {
+            return false;
         }
     }
 
-    private static List<DepotManifest.FileData> GetFilesToDownload(
+    // Builds the list of files that need downloading. For manifest changes, uses
+    // the hash diff. For all files in the target manifest, verifies the on-disk
+    // copy against the expected SHA-1 — catching corruption from interrupted
+    // writes, disk errors, or missing files.
+    private List<DepotManifest.FileData> GetFilesNeedingDownload(
         DepotManifest oldManifest,
-        DepotManifest newManifest
+        DepotManifest newManifest,
+        bool isUpdate
     )
     {
-        if (oldManifest == null)
-            return newManifest.Files.ToList();
-
-        var oldFiles = oldManifest.Files.ToDictionary(f => f.FileName);
+        var oldFiles = oldManifest?.Files.ToDictionary(f => f.FileName);
         var result = new List<DepotManifest.FileData>();
+        int verified = 0;
+        int corrupt = 0;
 
         foreach (var file in newManifest.Files)
         {
-            if (!oldFiles.TryGetValue(file.FileName, out var oldFile))
-            {
-                result.Add(file);
+            if (file.Flags.HasFlag(EDepotFileFlag.Directory))
                 continue;
+
+            // Manifest changed for this file — always re-download.
+            if (isUpdate && oldFiles != null)
+            {
+                if (
+                    !oldFiles.TryGetValue(file.FileName, out var oldFile)
+                    || !file.FileHash.SequenceEqual(oldFile.FileHash)
+                )
+                {
+                    result.Add(file);
+                    continue;
+                }
             }
 
-            if (!file.FileHash.SequenceEqual(oldFile.FileHash))
+            // Verify on-disk file matches the manifest hash.
+            var filePath = Path.Combine(_gameDir, file.FileName.Replace('\\', '/'));
+            if (VerifyFileHash(filePath, file))
+            {
+                verified++;
+            }
+            else
+            {
+                if (File.Exists(filePath))
+                {
+                    corrupt++;
+                    Log($"File needs re-download (hash mismatch): {file.FileName}");
+                }
                 result.Add(file);
+            }
         }
+
+        if (verified > 0)
+            Log($"Verified {verified} existing files");
+        if (corrupt > 0)
+            Log($"Found {corrupt} corrupt files requiring re-download");
 
         return result;
     }

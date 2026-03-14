@@ -3,37 +3,53 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Godot;
+using STS2Mobile.Patches;
 using STS2Mobile.Steam;
 
 namespace STS2Mobile.Launcher;
 
-// Whether the launcher should show the login form or auto-connect with saved credentials.
-public enum FastPathResult
-{
-    ShowLogin,
-    AutoConnect,
-}
-
-// Manages Steam session lifecycle, game file downloads, and update checks.
-// Events fire from SteamKit callback threads; the controller marshals them to the main thread.
+// Orchestrates the launcher flow: credential loading, authentication, ownership
+// verification, game file downloads, and update checks. Delegates persistence to
+// SteamCredentialStore and ownership to OwnershipVerifier. Events fire from
+// background threads; the controller marshals them to the main thread.
 public class LauncherModel : IDisposable
 {
     private readonly string _dataDir;
-    private SteamSession _session;
+    private readonly SteamCredentialStore _credentialStore;
+
+    private SteamConnection _connection;
+    private SteamAuth _auth;
     private DepotDownloader _downloader;
     private CancellationTokenSource _downloadCts;
-    private TaskCompletionSource<SteamSession> _launchTcs;
+    private TaskCompletionSource<bool> _launchTcs;
     private TaskCompletionSource<string> _codeTcs;
+    private SessionState _state = SessionState.Disconnected;
+    private string _failReason;
 
     public volatile bool OfflineMode;
     public volatile bool ConnectionResolved;
     public volatile bool AwaitingCode;
 
-    public SteamSession Session => _session;
-    public bool HasLaunchTcs => _launchTcs != null;
-    public string AccountName => _session?.AccountName;
-    public string FailReason => _session?.FailReason;
-    public SessionState SessionState => _session?.State ?? SessionState.Disconnected;
+    // True when launched from GameStartupWrapper (game files present). False in
+    // standalone launcher mode where a restart is needed after downloading files.
+    // Setting this to true eagerly creates the launch TCS so it exists before the
+    // UI is shown (preventing a race between PLAY button and WaitForLaunch).
+    private bool _inGameMode;
+    public bool InGameMode
+    {
+        get => _inGameMode;
+        set
+        {
+            _inGameMode = value;
+            if (value && _launchTcs == null)
+                _launchTcs = new TaskCompletionSource<bool>();
+        }
+    }
+    public string AccountName => _credentialStore.AccountName;
+    public string SavedAccountName => _credentialStore.AccountName;
+    public string SavedRefreshToken => _credentialStore.RefreshToken;
+    public string FailReason => _failReason;
+    public SessionState SessionState => _state;
 
     public event Action<SessionState> SessionStateChanged;
     public event Action<string> LogReceived;
@@ -49,101 +65,162 @@ public class LauncherModel : IDisposable
     public LauncherModel(string dataDir)
     {
         _dataDir = dataDir;
+        _credentialStore = new SteamCredentialStore(dataDir);
     }
 
-    public Task<SteamSession> WaitForLaunch()
+    public Task WaitForLaunch()
     {
-        _launchTcs = new TaskCompletionSource<SteamSession>();
+        _launchTcs ??= new TaskCompletionSource<bool>();
         return _launchTcs.Task;
     }
 
+    // Loads saved credentials and determines the launcher path. Sets
+    // LauncherPatches statics so cloud push/pull works on all code paths.
     public FastPathResult StartSession()
     {
         OfflineMode = false;
         ConnectionResolved = false;
-        _session = new SteamSession(_dataDir);
-        _session.StateChanged += s => SessionStateChanged?.Invoke(s);
-        _session.LogMessage += msg => LogReceived?.Invoke(msg);
+        _credentialStore.Load();
 
-        _session.CodeProvider = async (wasIncorrect) =>
+        if (_credentialStore.HasCredentials)
         {
-            AwaitingCode = true;
-            CodeNeeded?.Invoke(wasIncorrect);
-            _codeTcs = new TaskCompletionSource<string>();
-            var code = await _codeTcs.Task;
+            LauncherPatches.SavedAccountName = _credentialStore.AccountName;
+            LauncherPatches.SavedRefreshToken = _credentialStore.RefreshToken;
+        }
 
-            // Reconnect if WebSocket dropped while waiting (e.g. user backgrounded app to check authenticator).
-            if (_session.NeedsReconnectForAuth)
-                await _session.ReconnectForAuthAsync();
+        var verifier = CreateOwnershipVerifier();
+        var hasMarker = verifier?.HasMarker() ?? false;
+        PatchHelper.Log(
+            $"[Launcher] Fast path: creds={_credentialStore.HasCredentials}, marker={hasMarker}"
+        );
 
-            AwaitingCode = false;
-            return code;
-        };
+        if (_credentialStore.HasCredentials && hasMarker)
+            return FastPathResult.ReadyToLaunch;
 
-        var hasCreds = _session.HasSavedCredentials;
-        PatchHelper.Log($"[Launcher] Fast path check: creds={hasCreds}");
-
-        if (hasCreds)
+        if (_credentialStore.HasCredentials)
             return FastPathResult.AutoConnect;
 
         return FastPathResult.ShowLogin;
     }
 
-    public void Connect() => _session.Connect();
-
-    public async Task LoginAsync(string username, string password)
+    // Connects on-demand and verifies ownership. Used when we have saved
+    // credentials but no ownership marker.
+    public async void Connect()
     {
+        SetState(SessionState.Connecting);
+
         try
         {
-            await _session.LoginWithCredentialsAsync(username, password);
+            _connection = new SteamConnection(
+                _credentialStore.AccountName,
+                _credentialStore.RefreshToken
+            );
+            await VerifyOwnershipAsync();
         }
         catch (Exception ex)
         {
-            PatchHelper.Log($"Login error: {ex.Message}");
+            PatchHelper.Log($"[Launcher] Connection failed: {ex.Message}");
+            SetState(
+                SessionState.Failed,
+                "Could not connect to Steam. Check your internet connection."
+            );
+        }
+    }
+
+    // Performs interactive login via SteamAuth, saves credentials on success,
+    // then verifies ownership.
+    public async Task LoginAsync(string username, string password)
+    {
+        SetState(SessionState.Authenticating);
+
+        try
+        {
+            _auth = new SteamAuth();
+            _auth.LogMessage += msg => LogReceived?.Invoke(msg);
+            _auth.CodeProvider = async (wasIncorrect) =>
+            {
+                AwaitingCode = true;
+                CodeNeeded?.Invoke(wasIncorrect);
+                _codeTcs = new TaskCompletionSource<string>();
+                var code = await _codeTcs.Task;
+
+                if (_auth.NeedsReconnectForAuth)
+                    await _auth.ReconnectForAuthAsync();
+
+                AwaitingCode = false;
+                return code;
+            };
+
+            _auth.Connect();
+            var result = await _auth.LoginWithCredentialsAsync(
+                username,
+                password,
+                _credentialStore.GuardData
+            );
+
+            _credentialStore.Save(result.AccountName, result.RefreshToken, result.GuardData);
+            LauncherPatches.SavedAccountName = result.AccountName;
+            LauncherPatches.SavedRefreshToken = result.RefreshToken;
+
+            _auth.Dispose();
+            _auth = null;
+
+            _connection = new SteamConnection(result.AccountName, result.RefreshToken);
+            await VerifyOwnershipAsync();
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log($"[Launcher] Login failed: {ex.Message}");
+            SetState(SessionState.Failed, ex.Message);
+            _auth?.Dispose();
+            _auth = null;
         }
     }
 
     public void SubmitCode(string code) => _codeTcs?.TrySetResult(code);
 
+    // Creates or reuses a SteamConnection for depot operations.
     public async Task EnsureConnectedAsync()
     {
-        if (_session.State == SessionState.LoggedIn)
+        if (_state == SessionState.LoggedIn && _connection != null)
             return;
 
-        if (
-            _session.State != SessionState.Connecting
-            && _session.State != SessionState.Authenticating
-            && _session.State != SessionState.VerifyingOwnership
-        )
+        if (!_credentialStore.HasCredentials)
         {
-            _session.Connect();
+            SetState(SessionState.Failed, "No saved credentials");
+            return;
         }
 
-        for (int i = 0; i < 150; i++)
-        {
-            if (_session.State == SessionState.LoggedIn || _session.State == SessionState.Failed)
-                break;
-            await Task.Delay(100);
-        }
+        _connection ??= new SteamConnection(
+            _credentialStore.AccountName,
+            _credentialStore.RefreshToken
+        );
 
-        if (_session.State == SessionState.LoggedIn)
+        SetState(SessionState.Connecting);
+        try
         {
-            OfflineMode = false;
+            await _connection.Apps.PICSGetAccessTokens(2868840, null);
             ConnectionResolved = true;
+            OfflineMode = false;
+            SetState(SessionState.LoggedIn);
+        }
+        catch (Exception ex)
+        {
+            SetState(SessionState.Failed, $"Connection failed: {ex.Message}");
         }
     }
 
     public async Task StartDownloadAsync()
     {
         await EnsureConnectedAsync();
-        if (_session.State != SessionState.LoggedIn)
+        if (_state != SessionState.LoggedIn || _connection == null)
         {
             DownloadFailed?.Invoke(null);
             return;
         }
 
         _downloader?.Dispose();
-        _downloader = new DepotDownloader(_session, _dataDir);
+        _downloader = new DepotDownloader(_connection, _dataDir);
         _downloader.LogMessage += msg => DownloadLogReceived?.Invoke(msg);
         _downloader.ProgressChanged += p => DownloadProgressChanged?.Invoke(p);
 
@@ -161,7 +238,7 @@ public class LauncherModel : IDisposable
         catch (Exception ex)
         {
             DownloadFailed?.Invoke(ex.Message);
-            PatchHelper.Log($"Download error: {ex}");
+            PatchHelper.Log($"[Launcher] Download error: {ex}");
         }
     }
 
@@ -170,13 +247,13 @@ public class LauncherModel : IDisposable
         try
         {
             await EnsureConnectedAsync();
-            if (_session.State != SessionState.LoggedIn)
+            if (_state != SessionState.LoggedIn || _connection == null)
             {
                 UpdateCheckFailed?.Invoke("Not connected");
                 return;
             }
 
-            var downloader = new DepotDownloader(_session, _dataDir);
+            var downloader = new DepotDownloader(_connection, _dataDir);
             downloader.LogMessage += msg => DownloadLogReceived?.Invoke(msg);
 
             bool hasUpdate = await Task.Run(() => downloader.CheckForUpdatesAsync());
@@ -194,30 +271,77 @@ public class LauncherModel : IDisposable
     {
         _downloadCts?.Cancel();
         _downloader?.Dispose();
-        _session?.Dispose();
+        _connection?.Dispose();
+        _connection = null;
+        _auth?.Dispose();
+        _auth = null;
         return StartSession();
     }
 
     public void Launch()
     {
+        if (_credentialStore.HasCredentials)
+        {
+            LauncherPatches.SavedAccountName = _credentialStore.AccountName;
+            LauncherPatches.SavedRefreshToken = _credentialStore.RefreshToken;
+        }
+
         if (_launchTcs != null)
-            _launchTcs.TrySetResult(OfflineMode ? null : _session);
+            _launchTcs.TrySetResult(true);
         else
         {
-            PatchHelper.Log("Restarting app to load game files...");
+            PatchHelper.Log("[Launcher] Restarting app to load game files");
             GetGodotApp()?.Call("restartApp");
         }
     }
+
+    public bool HasOwnershipMarker() => CreateOwnershipVerifier()?.HasMarker() ?? false;
 
     public void Dispose()
     {
         _downloadCts?.Cancel();
         _downloader?.Dispose();
+        _auth?.Dispose();
         if (_launchTcs == null)
-            _session?.Dispose();
+            _connection?.Dispose();
     }
 
-    // Checks if the PCK file exists and has a valid Godot magic header.
+    private async Task VerifyOwnershipAsync()
+    {
+        SetState(SessionState.VerifyingOwnership);
+
+        var verifier = CreateOwnershipVerifier();
+        bool owns = await verifier.VerifyAsync(_connection);
+
+        if (owns)
+        {
+            PatchHelper.Log("[Launcher] Ownership verified");
+            ConnectionResolved = true;
+            SetState(SessionState.LoggedIn);
+        }
+        else
+        {
+            PatchHelper.Log("[Launcher] Ownership denied");
+            SetState(
+                SessionState.Failed,
+                "You don't own Slay the Spire 2. Purchase on Steam to play."
+            );
+        }
+    }
+
+    private OwnershipVerifier CreateOwnershipVerifier()
+    {
+        var account = _credentialStore.AccountName;
+        return account != null ? new OwnershipVerifier(_dataDir, account) : null;
+    }
+
+    private void SetState(SessionState state, string failReason = null)
+    {
+        _state = state;
+        _failReason = failReason;
+        SessionStateChanged?.Invoke(state);
+    }
+
     public static bool GameFilesReady()
     {
         var pckPath = Path.Combine(OS.GetDataDir(), "game", "SlayTheSpire2.pck");

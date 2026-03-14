@@ -12,8 +12,6 @@ namespace STS2Mobile.Patches;
 // can sideload mods to /storage/emulated/0/StS2Launcher/Mods/ without root.
 public static class ModLoaderPatches
 {
-    private const string ExternalModsPath = "/storage/emulated/0/StS2Launcher/Mods";
-
     private static readonly BindingFlags AllStatic =
         BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
@@ -33,17 +31,17 @@ public static class ModLoaderPatches
     {
         try
         {
-            using var dirAccess = DirAccess.Open(ExternalModsPath);
+            using var dirAccess = DirAccess.Open(AppPaths.ExternalModsDir);
             if (dirAccess == null)
             {
                 PatchHelper.Log(
-                    $"[Mods] External mods directory not found: {ExternalModsPath} "
+                    $"[Mods] External mods directory not found: {AppPaths.ExternalModsDir} "
                         + $"(error: {DirAccess.GetOpenError()})"
                 );
                 return;
             }
 
-            PatchHelper.Log($"[Mods] Scanning external mods: {ExternalModsPath}");
+            PatchHelper.Log($"[Mods] Scanning external mods: {AppPaths.ExternalModsDir}");
 
             var initializedField = typeof(ModManager).GetField("_initialized", AllStatic);
             initializedField.SetValue(null, false);
