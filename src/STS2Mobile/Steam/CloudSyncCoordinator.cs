@@ -14,6 +14,8 @@ public static class CloudSyncCoordinator
     private const int MaxBackups = 50;
     private const int HistoryFileLimit = 100;
 
+    internal static bool LocalBackupEnabled;
+
     public static async Task PushFileAsync(ISaveStore local, ICloudSaveStore cloud, string path)
     {
         if (!local.FileExists(path))
@@ -247,29 +249,44 @@ public static class CloudSyncCoordinator
     public static List<string> GetSaveFilePaths(ISaveStore store)
     {
         var paths = new List<string>();
-        for (int i = 1; i <= 3; i++)
-        {
-            paths.Add(ProgressSaveManager.GetProgressPathForProfile(i));
-            paths.Add(RunSaveManager.GetRunSavePath(i, "current_run.save"));
-            paths.Add(RunSaveManager.GetRunSavePath(i, "current_run_mp.save"));
-            paths.Add(PrefsSaveManager.GetPrefsPath(i));
-            AddHistoryFiles(paths, store.GetFilesInDirectory, store.DirectoryExists, i);
-        }
+        CollectProfilePaths(paths, store.GetFilesInDirectory, store.DirectoryExists);
         return paths;
     }
 
     public static List<string> GetSaveFilePaths(ICloudSaveStore store)
     {
         var paths = new List<string>();
-        for (int i = 1; i <= 3; i++)
-        {
-            paths.Add(ProgressSaveManager.GetProgressPathForProfile(i));
-            paths.Add(RunSaveManager.GetRunSavePath(i, "current_run.save"));
-            paths.Add(RunSaveManager.GetRunSavePath(i, "current_run_mp.save"));
-            paths.Add(PrefsSaveManager.GetPrefsPath(i));
-            AddHistoryFiles(paths, store.GetFilesInDirectory, store.DirectoryExists, i);
-        }
+        CollectProfilePaths(paths, store.GetFilesInDirectory, store.DirectoryExists);
         return paths;
+    }
+
+    // Collects save paths for both vanilla and modded profile directories.
+    private static void CollectProfilePaths(
+        List<string> paths,
+        Func<string, string[]> getFiles,
+        Func<string, bool> dirExists
+    )
+    {
+        var wasModded = UserDataPathProvider.IsRunningModded;
+        try
+        {
+            foreach (bool modded in new[] { false, true })
+            {
+                UserDataPathProvider.IsRunningModded = modded;
+                for (int i = 1; i <= 3; i++)
+                {
+                    paths.Add(ProgressSaveManager.GetProgressPathForProfile(i));
+                    paths.Add(RunSaveManager.GetRunSavePath(i, "current_run.save"));
+                    paths.Add(RunSaveManager.GetRunSavePath(i, "current_run_mp.save"));
+                    paths.Add(PrefsSaveManager.GetPrefsPath(i));
+                    AddHistoryFiles(paths, getFiles, dirExists, i);
+                }
+            }
+        }
+        finally
+        {
+            UserDataPathProvider.IsRunningModded = wasModded;
+        }
     }
 
     private static void AddHistoryFiles(
@@ -314,6 +331,9 @@ public static class CloudSyncCoordinator
         try
         {
             if (string.IsNullOrEmpty(content))
+                return;
+
+            if (!LocalBackupEnabled || !AppPaths.HasStoragePermission())
                 return;
 
             var canonPath = path.Replace("user://", "").Replace("\\", "/");
@@ -363,6 +383,9 @@ public static class CloudSyncCoordinator
         {
             var canonPath = path.Replace("user://", "").Replace("\\", "/").ToLowerInvariant();
             if (!canonPath.Contains("progress") || !canonPath.EndsWith(".save"))
+                return;
+
+            if (!LocalBackupEnabled || !AppPaths.HasStoragePermission())
                 return;
 
             var parts = canonPath.Split('/');

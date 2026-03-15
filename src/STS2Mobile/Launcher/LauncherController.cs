@@ -109,11 +109,17 @@ public class LauncherController
         _view.Download.DownloadRequested += OnDownloadPressed;
         _view.Actions.LaunchPressed += OnLaunchPressed;
         _view.Actions.RetryPressed += OnRetryPressed;
+        _view.Actions.LocalBackupToggled += OnLocalBackupToggled;
         _view.Actions.CloudSyncToggled += OnCloudSyncToggled;
         _view.Actions.CloudPushPressed += OnCloudPushPressed;
         _view.Actions.CloudPullPressed += OnCloudPullPressed;
         _view.Actions.CheckForUpdatesPressed += OnCheckForUpdatesPressed;
 
+        var localBackupPref = LauncherModel.LoadLocalBackupPref();
+        _view.Actions.SetLocalBackupChecked(localBackupPref);
+        CloudSyncCoordinator.LocalBackupEnabled = localBackupPref;
+        if (localBackupPref)
+            AppPaths.EnsureExternalDirectories();
         _view.Actions.SetCloudSyncChecked(LauncherModel.LoadCloudSyncPref());
 
         var result = _model.StartSession();
@@ -279,6 +285,18 @@ public class LauncherController
         _checkingForUpdates = false;
     }
 
+    private void OnLocalBackupToggled(bool pressed)
+    {
+        if (pressed && !AppPaths.HasStoragePermission())
+            AppPaths.RequestStoragePermission();
+
+        if (pressed)
+            AppPaths.EnsureExternalDirectories();
+
+        LauncherModel.SaveLocalBackupPref(pressed);
+        CloudSyncCoordinator.LocalBackupEnabled = pressed;
+    }
+
     private void OnCloudSyncToggled(bool pressed)
     {
         LauncherModel.SaveCloudSyncPref(pressed);
@@ -287,9 +305,6 @@ public class LauncherController
 
     private void OnCloudPushPressed()
     {
-        if (!EnsureStoragePermission())
-            return;
-
         ShowConfirmation(
             "Push local saves to cloud?\nThis will overwrite your cloud saves.",
             () =>
@@ -314,9 +329,6 @@ public class LauncherController
 
     private void OnCloudPullPressed()
     {
-        if (!EnsureStoragePermission())
-            return;
-
         ShowConfirmation(
             "Pull cloud saves to local?\nThis will overwrite your local saves.",
             () =>
@@ -337,21 +349,6 @@ public class LauncherController
                 });
             }
         );
-    }
-
-    // Checks for external storage permission. If not granted, prompts the user
-    // and returns false so the caller can abort.
-    private bool EnsureStoragePermission()
-    {
-        if (AppPaths.HasStoragePermission())
-            return true;
-
-        _view.ShowConfirmation(
-            "Storage permission is required for save backups.\n"
-                + "Grant access on the next screen, then try again.",
-            () => AppPaths.RequestStoragePermission()
-        );
-        return false;
     }
 
     private void ShowConfirmation(string message, Action onConfirmed)

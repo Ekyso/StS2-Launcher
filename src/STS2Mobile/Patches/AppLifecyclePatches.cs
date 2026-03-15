@@ -37,6 +37,14 @@ public static class AppLifecyclePatches
                 )
             );
         }
+
+        // Redirect NGame.Quit to restart the app instead of force-killing the process.
+        PatchHelper.Patch(
+            harmony,
+            typeof(MegaCrit.Sts2.Core.Nodes.NGame),
+            "Quit",
+            prefix: PatchHelper.Method(typeof(AppLifecyclePatches), nameof(QuitPrefix))
+        );
     }
 
     public static void EnterBackgroundPostfix(object __instance)
@@ -224,6 +232,28 @@ public static class AppLifecyclePatches
         catch (Exception ex)
         {
             PatchHelper.Log($"ExitBackgroundPrefix failed: {ex.Message}");
+            return true;
+        }
+    }
+
+    // Replaces the default quit (force-kill) with a clean app restart via GodotApp.
+    // Saves are already written by the original Quit() callers before this runs.
+    public static bool QuitPrefix(object __instance)
+    {
+        try
+        {
+            try { SteamKit2CloudSaveStore.Instance?.Flush(5000); } catch { }
+
+            PatchHelper.Log("NGame.Quit intercepted, restarting app");
+            var jcw = Engine.GetSingleton("JavaClassWrapper");
+            var wrapper = (GodotObject)jcw.Call("wrap", "com.game.sts2launcher.GodotApp");
+            var godotApp = (GodotObject)wrapper.Call("getInstance");
+            godotApp.Call("restartApp");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log($"QuitPrefix failed, falling back to default: {ex.Message}");
             return true;
         }
     }

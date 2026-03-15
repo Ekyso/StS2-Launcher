@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using Godot;
 
 namespace STS2Mobile;
@@ -39,6 +40,24 @@ public static class AppPaths
         {
             PatchHelper.Log($"Failed to request storage permission: {ex.Message}");
         }
+    }
+
+    // Creates the external Mods and Saves directories if storage permission is granted.
+    public static void EnsureExternalDirectories()
+    {
+        if (!HasStoragePermission())
+            return;
+
+        try
+        {
+            Directory.CreateDirectory(ExternalModsDir);
+        }
+        catch { }
+        try
+        {
+            Directory.CreateDirectory(ExternalSaveBackupsDir);
+        }
+        catch { }
     }
 
     private static GodotObject GetGodotApp()

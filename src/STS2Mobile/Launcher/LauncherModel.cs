@@ -369,6 +369,29 @@ public class LauncherModel : IDisposable
         return $"{bytes / 1024.0:F0} KB";
     }
 
+    private static string LocalBackupPrefPath =>
+        Path.Combine(OS.GetDataDir(), "local_backup_enabled");
+
+    public static bool LoadLocalBackupPref()
+    {
+        try
+        {
+            if (File.Exists(LocalBackupPrefPath))
+                return File.ReadAllText(LocalBackupPrefPath).Trim() == "true";
+        }
+        catch { }
+        return false;
+    }
+
+    public static void SaveLocalBackupPref(bool enabled)
+    {
+        try
+        {
+            File.WriteAllText(LocalBackupPrefPath, enabled ? "true" : "false");
+        }
+        catch { }
+    }
+
     private static string CloudSyncPrefPath => Path.Combine(OS.GetDataDir(), "cloud_sync_enabled");
 
     public static bool LoadCloudSyncPref()
