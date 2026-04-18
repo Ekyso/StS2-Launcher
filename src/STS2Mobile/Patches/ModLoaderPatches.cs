@@ -51,15 +51,45 @@ public static class ModLoaderPatches
 
             initializedField.SetValue(null, true);
 
-            // Rebuild _loadedMods to include anything new
+            // Rebuild _loadedMods to include anything new. Resolve Mod.wasLoaded
+            // and ModManager.LoadedMods via reflection: MegaCrit renamed both
+            // post-update (to PascalCase or elsewhere) and we want the build
+            // to survive further renames.
+            const BindingFlags InstFlags =
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
             var modsField = typeof(ModManager).GetField("_mods", AllStatic);
             var loadedModsField = typeof(ModManager).GetField("_loadedMods", AllStatic);
-            var allMods = (List<Mod>)modsField.GetValue(null);
-            loadedModsField.SetValue(null, allMods.Where(m => m.wasLoaded).ToList());
+            var allMods = (System.Collections.IList)modsField.GetValue(null);
 
-            PatchHelper.Log(
-                $"[Mods] External scan complete. Total loaded: {ModManager.LoadedMods.Count}"
-            );
+            MemberInfo wasLoadedMember =
+                (MemberInfo)typeof(Mod).GetField("wasLoaded", InstFlags)
+                ?? typeof(Mod).GetField("WasLoaded", InstFlags)
+                ?? (MemberInfo)typeof(Mod).GetProperty("wasLoaded", InstFlags)
+                ?? typeof(Mod).GetProperty("WasLoaded", InstFlags);
+
+            if (wasLoadedMember == null)
+            {
+                PatchHelper.Log(
+                    "[Mods] Could not locate Mod.wasLoaded field/property; skipping filter."
+                );
+                return;
+            }
+
+            Func<object, bool> isLoaded = wasLoadedMember switch
+            {
+                FieldInfo fi => (m => (bool)fi.GetValue(m)),
+                PropertyInfo pi => (m => (bool)pi.GetValue(m)),
+                _ => (_ => false),
+            };
+
+            var filtered = new List<Mod>();
+            foreach (var mod in allMods)
+                if (isLoaded(mod))
+                    filtered.Add((Mod)mod);
+            loadedModsField.SetValue(null, filtered);
+
+            PatchHelper.Log($"[Mods] External scan complete. Total loaded: {filtered.Count}");
         }
         catch (Exception ex)
         {
