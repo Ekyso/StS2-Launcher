@@ -43,22 +43,39 @@ public static class ModLoaderPatches
 
             PatchHelper.Log($"[Mods] Scanning external mods: {AppPaths.ExternalModsDir}");
 
-            var initializedField = typeof(ModManager).GetField("_initialized", AllStatic);
-            initializedField.SetValue(null, false);
+            // The current sts2.dll API splits mod loading in two:
+            //   ReadModsInDirRecursive(path, source, newMods) — reads manifests
+            //   TryLoadMod(mod)                                — loads a single mod
+            // The previous LoadModsInDirRecursive(DirAccess, ModSource) atomic
+            // call no longer exists, and load state is tracked directly via
+            // Mod.state (ModLoadState enum) instead of a Mod.wasLoaded bool +
+            // ModManager._loadedMods cache.
+            var readMethod = typeof(ModManager).GetMethod("ReadModsInDirRecursive", AllStatic);
+            var newMods = new List<Mod>();
+            readMethod.Invoke(
+                null,
+                new object[] { AppPaths.ExternalModsDir, ModSource.ModsDirectory, newMods }
+            );
 
-            var loadMethod = typeof(ModManager).GetMethod("LoadModsInDirRecursive", AllStatic);
-            loadMethod.Invoke(null, new object[] { dirAccess, ModSource.ModsDirectory });
+            var tryLoadMethod = typeof(ModManager).GetMethod("TryLoadMod", AllStatic);
+            foreach (var mod in newMods)
+            {
+                tryLoadMethod.Invoke(null, new object[] { mod });
+            }
 
-            initializedField.SetValue(null, true);
-
-            // Rebuild _loadedMods to include anything new
+            // Ensure newly loaded mods are visible in ModManager.Mods so the
+            // rest of the game can see them.
             var modsField = typeof(ModManager).GetField("_mods", AllStatic);
-            var loadedModsField = typeof(ModManager).GetField("_loadedMods", AllStatic);
             var allMods = (List<Mod>)modsField.GetValue(null);
-            loadedModsField.SetValue(null, allMods.Where(m => m.wasLoaded).ToList());
+            foreach (var mod in newMods)
+            {
+                if (!allMods.Contains(mod))
+                    allMods.Add(mod);
+            }
 
+            int loadedCount = newMods.Count(m => m.state == ModLoadState.Loaded);
             PatchHelper.Log(
-                $"[Mods] External scan complete. Total loaded: {ModManager.LoadedMods.Count}"
+                $"[Mods] External scan complete. {loadedCount}/{newMods.Count} loaded."
             );
         }
         catch (Exception ex)
