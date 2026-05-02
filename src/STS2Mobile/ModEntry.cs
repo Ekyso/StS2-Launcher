@@ -61,6 +61,7 @@ public static class ModEntry
         // Game patches require sts2.dll; if missing, fall through to standalone launcher.
         try
         {
+            FontSubstitutionPatches.Apply(_harmony);
             ModelDbInitPatch.Apply(_harmony);
             PlatformPatches.Apply(_harmony);
             SettingsPatches.Apply(_harmony);
