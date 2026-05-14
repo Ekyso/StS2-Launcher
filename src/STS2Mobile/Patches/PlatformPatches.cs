@@ -1,3 +1,6 @@
+using System;
+using System.Globalization;
+using System.Reflection;
 using System.Threading.Tasks;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Debug;
@@ -50,6 +53,10 @@ public static class PlatformPatches
             "Initialize",
             prefix: PatchHelper.Method(typeof(PlatformPatches), nameof(SkipPrefix))
         );
+
+        // Android can append Unicode locale extensions for regional preferences
+        // (e.g. "de-DE-u-mu-celsius") which CultureInfo cannot parse here.
+        PatchGetThreeLetterLanguageCode(harmony);
     }
 
     public static bool InitializePlatformPrefix(ref Task<bool> __result)
@@ -74,5 +81,80 @@ public static class PlatformPatches
         if (!fullPath.Contains("://"))
             return false;
         return true;
+    }
+
+    private static void PatchGetThreeLetterLanguageCode(Harmony harmony)
+    {
+        try
+        {
+            var sts2Asm = typeof(NGame).Assembly;
+            var nullStrategyType = sts2Asm.GetType(
+                "MegaCrit.Sts2.Core.Platform.Null.NullPlatformUtilStrategy"
+            );
+            if (nullStrategyType == null)
+            {
+                PatchHelper.Log("Locale fix: NullPlatformUtilStrategy not found, skipping");
+                return;
+            }
+
+            var method = nullStrategyType.GetMethod(
+                "GetThreeLetterLanguageCode",
+                BindingFlags.Public | BindingFlags.Instance
+            );
+            if (method == null)
+            {
+                PatchHelper.Log("Locale fix: GetThreeLetterLanguageCode not found, skipping");
+                return;
+            }
+
+            harmony.Patch(
+                method,
+                prefix: new HarmonyMethod(
+                    typeof(PlatformPatches).GetMethod(
+                        nameof(GetThreeLetterLanguageCodePrefix),
+                        BindingFlags.Public | BindingFlags.Static
+                    )
+                )
+            );
+            PatchHelper.Log("Patched NullPlatformUtilStrategy.GetThreeLetterLanguageCode (locale fix)");
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log($"Locale fix failed: {ex.Message}");
+        }
+    }
+
+    // Strip Unicode extension subtags (e.g. "-u-mu-celsius") from the locale
+    // string before passing it to CultureInfo, which doesn't understand them.
+    public static bool GetThreeLetterLanguageCodePrefix(ref string __result)
+    {
+        try
+        {
+            var locale = Godot.OS.GetLocale();
+            var sanitized = StripUnicodeExtensions(locale.Replace('_', '-'));
+            PatchHelper.Log($"Locale fix: raw='{locale}' sanitized='{sanitized}'");
+            var culture = new CultureInfo(sanitized);
+            __result = culture.ThreeLetterISOLanguageName;
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log($"Locale fix: fallback to 'eng' due to: {ex.Message}");
+            __result = "eng";
+        }
+        return false;
+    }
+
+    // Strips Unicode extension subtags while preserving the base locale.
+    // Examples: "de-DE-u-mu-celsius" -> "de-DE", "en-US-#u-ms-metric" -> "en-US".
+    private static string StripUnicodeExtensions(string locale)
+    {
+        var unicodeIdx = locale.IndexOf("-u-", StringComparison.OrdinalIgnoreCase);
+        var legacyUnicodeIdx = locale.IndexOf("-#u-", StringComparison.OrdinalIgnoreCase);
+
+        var idx = unicodeIdx;
+        if (idx < 0 || (legacyUnicodeIdx >= 0 && legacyUnicodeIdx < idx))
+            idx = legacyUnicodeIdx;
+
+        return idx >= 0 ? locale.Substring(0, idx) : locale;
     }
 }
