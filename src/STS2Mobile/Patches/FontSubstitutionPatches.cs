@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Nodes;
@@ -32,29 +33,35 @@ public static class FontSubstitutionPatches
             return;
         }
 
-        var target = fontUtilsType.GetMethod(
-            "ApplyLocaleFontSubstitution",
-            BindingFlags.Public
-                | BindingFlags.NonPublic
-                | BindingFlags.Static
-                | BindingFlags.Instance
-        );
-        if (target == null)
-        {
-            PatchHelper.Log(
-                "FontSubstitutionPatches: ApplyLocaleFontSubstitution method not found; skipping"
-            );
-            return;
-        }
-
         try
         {
+            var targets = fontUtilsType
+                .GetMethods(
+                    BindingFlags.Public
+                        | BindingFlags.NonPublic
+                        | BindingFlags.Static
+                        | BindingFlags.Instance
+                )
+                .Where(method => method.Name == "ApplyLocaleFontSubstitution")
+                .ToArray();
+            if (targets.Length == 0)
+            {
+                PatchHelper.Log(
+                    "FontSubstitutionPatches: ApplyLocaleFontSubstitution method not found; skipping"
+                );
+                return;
+            }
+
             var finalizer = typeof(FontSubstitutionPatches).GetMethod(
                 nameof(ApplyLocaleFontSubstitutionFinalizer),
                 BindingFlags.NonPublic | BindingFlags.Static
             );
-            harmony.Patch(target, finalizer: new HarmonyMethod(finalizer));
-            PatchHelper.Log("Patched FontControlUtils.ApplyLocaleFontSubstitution (finalizer)");
+            foreach (var target in targets)
+                harmony.Patch(target, finalizer: new HarmonyMethod(finalizer));
+
+            PatchHelper.Log(
+                $"Patched FontControlUtils.ApplyLocaleFontSubstitution ({targets.Length} finalizer target(s))"
+            );
         }
         catch (Exception ex)
         {
