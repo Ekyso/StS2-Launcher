@@ -235,6 +235,14 @@ public class SteamKit2CloudSaveStore : ICloudSaveStore, ISaveStore, IDisposable
 
     public bool HasCloudFiles() => _cache.HasCloudFiles();
 
+    // ICloudSaveStore member added by a base-game update. The launcher class was
+    // compiled before it existed, so interface vtable setup failed at type-load
+    // (TypeLoadException in ConstructDefaultPrefix). The game's CloudSaveStore
+    // wrapper delegates this call straight to the injected cloud store, so mirror
+    // the launcher's cloud-sync toggle — matching desktop SteamRemoteSaveStore,
+    // which returns the user's Steam cloud setting.
+    public bool HasUserEnabledCloudSync() => STS2Mobile.Patches.LauncherPatches.CloudSyncEnabled;
+
     public void ForgetFile(string path) => _cache.ForgetFile(path);
 
     public bool IsFilePersisted(string path) => _cache.IsFilePersisted(path);

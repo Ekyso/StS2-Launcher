@@ -29,41 +29,15 @@ public static class ModLoaderPatches
     // Temporarily clears _initialized so TryLoadModFromPck accepts new entries.
     public static void InitializePostfix()
     {
-        try
-        {
-            using var dirAccess = DirAccess.Open(AppPaths.ExternalModsDir);
-            if (dirAccess == null)
-            {
-                PatchHelper.Log(
-                    $"[Mods] External mods directory not found: {AppPaths.ExternalModsDir} "
-                        + $"(error: {DirAccess.GetOpenError()})"
-                );
-                return;
-            }
-
-            PatchHelper.Log($"[Mods] Scanning external mods: {AppPaths.ExternalModsDir}");
-
-            var initializedField = typeof(ModManager).GetField("_initialized", AllStatic);
-            initializedField.SetValue(null, false);
-
-            var loadMethod = typeof(ModManager).GetMethod("LoadModsInDirRecursive", AllStatic);
-            loadMethod.Invoke(null, new object[] { dirAccess, ModSource.ModsDirectory });
-
-            initializedField.SetValue(null, true);
-
-            // Rebuild _loadedMods to include anything new
-            var modsField = typeof(ModManager).GetField("_mods", AllStatic);
-            var loadedModsField = typeof(ModManager).GetField("_loadedMods", AllStatic);
-            var allMods = (List<Mod>)modsField.GetValue(null);
-            loadedModsField.SetValue(null, allMods.Where(m => m.wasLoaded).ToList());
-
-            PatchHelper.Log(
-                $"[Mods] External scan complete. Total loaded: {ModManager.LoadedMods.Count}"
-            );
-        }
-        catch (Exception ex)
-        {
-            PatchHelper.Log($"[Mods] Failed to load external mods: {ex}");
-        }
+        // The base-game update refactored ModManager: it removed the _initialized and
+        // _loadedMods fields, renamed LoadModsInDirRecursive -> ReadModsInDirRecursive,
+        // replaced Mod.wasLoaded with Mod.state, and ModManager.LoadedMods with
+        // ModManager.GetLoadedMods(). The external-mods sideload logic here relied on the
+        // old shape, so it is disabled until ported. Steam Workshop mods are unaffected
+        // (the game's own ModManager.Initialize still handles those).
+        PatchHelper.Log(
+            "[Mods] External-mods sideloading disabled on this build "
+                + "(pending port to the updated ModManager API)."
+        );
     }
 }
