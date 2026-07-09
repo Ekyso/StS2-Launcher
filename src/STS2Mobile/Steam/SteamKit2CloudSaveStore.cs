@@ -60,6 +60,13 @@ public class SteamKit2CloudSaveStore : ICloudSaveStore, ISaveStore, IDisposable
         _connection.Flush();
     }
 
+    // Flushes only the pending cloud writes, without the connection drain. Used on
+    // app background / quit, where blocking the render thread on the full Flush
+    // (write queue + up to a 5s connection drain) risks an ANR. The background write
+    // queue keeps draining afterward while the process is cached, and the connection
+    // either idles out or dies with the restart — so the explicit drain adds nothing.
+    public void FlushWrites(int timeoutMs) => _writeQueue.Flush(timeoutMs);
+
     public void Dispose()
     {
         _writeQueue.Dispose();
