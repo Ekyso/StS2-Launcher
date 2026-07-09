@@ -92,6 +92,17 @@ public static class LauncherPatches
         ref Task __result
     )
     {
+        // If the cloud file list isn't warm yet (background enumerate still running, or it
+        // failed on a slow/absent connection), skip the sync for this file rather than
+        // stalling the render thread on the network. Using the local copy this launch is
+        // safe; acting on a half-loaded list could push a stale local save over a newer
+        // cloud one. The list warms in the background and the next launch syncs normally.
+        if (SteamKit2CloudSaveStore.Instance is { IsCacheReady: false })
+        {
+            __result = Task.CompletedTask;
+            return false;
+        }
+
         __result = CloudSyncCoordinator.AutoSyncFileAsync(
             __instance.LocalStore,
             __instance.CloudStore,
@@ -134,6 +145,13 @@ public static class LauncherPatches
             warmup.QueueFree();
         }
 
+        // Cover the launcher->game handoff (settings init + GameStartup loads the game's
+        // data and can take many seconds) so the app doesn't look frozen with a blank
+        // screen between the launcher disappearing and the game's first frame.
+        var loading = new LoadingScreen();
+        gameNode.AddChild(loading);
+        loading.Initialize();
+
         SaveManager.Instance.InitSettingsData();
 
         var gameStartup = game.GetType()
@@ -147,6 +165,10 @@ public static class LauncherPatches
         {
             PatchHelper.Log($"Game startup failed: {ex.InnerException?.Message}");
             throw ex.InnerException ?? ex;
+        }
+        finally
+        {
+            loading.QueueFree();
         }
     }
 }

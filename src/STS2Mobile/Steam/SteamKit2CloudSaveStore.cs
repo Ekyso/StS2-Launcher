@@ -176,6 +176,14 @@ public class SteamKit2CloudSaveStore : ICloudSaveStore, ISaveStore, IDisposable
 
     public bool FileExists(string path) => _cache.FileExists(path);
 
+    // Whether the cloud file list has finished loading (background prewarm complete).
+    // The render-thread cloud sync is gated on this so it never stalls on the network.
+    public bool IsCacheReady => _cache.IsLoaded;
+
+    // Blocks until the cloud file list is loaded. Only for user-initiated / background
+    // operations (manual push/pull) that need the full list — never the render thread.
+    public void EnsureCacheReady() => _cache.Prewarm();
+
     public bool DirectoryExists(string path) => true;
 
     public void DeleteFile(string path)

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 using SteamKit2.Internal;
 
 namespace STS2Mobile.Steam;
@@ -15,8 +16,6 @@ public class CloudFileCache
     private readonly SteamConnection _connection;
     private readonly ConcurrentDictionary<string, CloudFileInfo> _files = new();
     private volatile bool _loaded;
-    private int _retries;
-    private DateTimeOffset _nextRetryTime = DateTimeOffset.MinValue;
     private readonly object _loadLock = new();
 
     public CloudFileCache(SteamConnection connection)
@@ -29,15 +28,22 @@ public class CloudFileCache
         return path.Replace("user://", "").Replace("\\", "/");
     }
 
+    // True once the cloud file list has been loaded (via the background Prewarm or an
+    // explicit Refresh). Callers that must not act on a half-loaded list check this first.
+    public bool IsLoaded => _loaded;
+
+    // Query methods deliberately do NOT trigger a (blocking) network load: the list is
+    // warmed on a background thread at store construction. On the render thread we must
+    // never stall on the network, so an unwarmed cache simply reads as empty here — the
+    // cloud sync is gated on IsLoaded (see SyncCloudToLocalPrefix) so it will not act
+    // destructively on that empty view, and HasCloudFiles stays conservative below.
     public bool FileExists(string path)
     {
-        EnsureLoaded();
         return _files.ContainsKey(CanonicalizePath(path));
     }
 
     public DateTimeOffset GetLastModifiedTime(string path)
     {
-        EnsureLoaded();
         return _files.TryGetValue(CanonicalizePath(path), out var info)
             ? info.Timestamp
             : DateTimeOffset.MinValue;
@@ -45,13 +51,11 @@ public class CloudFileCache
 
     public int GetFileSize(string path)
     {
-        EnsureLoaded();
         return _files.TryGetValue(CanonicalizePath(path), out var info) ? info.Size : 0;
     }
 
     public bool HasCloudFiles()
     {
-        EnsureLoaded();
         if (!_loaded)
             return true; // Assume cloud has files to prevent destructive sync
         return _files.Count > 0;
@@ -81,7 +85,6 @@ public class CloudFileCache
     public string[] GetFilesInDirectory(string directoryPath)
     {
         directoryPath = CanonicalizePath(directoryPath);
-        EnsureLoaded();
 
         var prefix = directoryPath.Length > 0 ? directoryPath + "/" : "";
         var result = new List<string>();
@@ -102,7 +105,6 @@ public class CloudFileCache
     public string[] GetDirectoriesInDirectory(string directoryPath)
     {
         directoryPath = CanonicalizePath(directoryPath);
-        EnsureLoaded();
 
         var prefix = directoryPath.Length > 0 ? directoryPath + "/" : "";
         var dirs = new HashSet<string>();
@@ -125,50 +127,51 @@ public class CloudFileCache
     {
         _files.Clear();
         _loaded = false;
-        _retries = 0;
-        _nextRetryTime = DateTimeOffset.MinValue;
-        EnsureLoaded();
+        Prewarm();
     }
 
-    // Eagerly loads the file list if it isn't loaded yet. Intended to be called from a
-    // background thread at construction time so the game's first synchronous query on the
-    // main thread finds the list already cached instead of stalling on the enumeration.
-    public void Prewarm() => EnsureLoaded();
+    // Loads the cloud file list, retrying a bounded number of times with a short backoff.
+    // MUST run on a background thread (store construction / manual push-pull) — it is the
+    // ONLY path that enumerates now, since queries no longer load lazily on the render
+    // thread. Bounded so a dead connection can't churn for minutes; a transient startup
+    // blip still recovers because we retry here instead of failing the whole session.
+    public void Prewarm()
+    {
+        for (int attempt = 1; attempt <= MaxRetries && !_loaded; attempt++)
+        {
+            if (TryLoadOnce())
+                return;
+            if (attempt < MaxRetries)
+                Thread.Sleep(Math.Min(1000 * attempt, 5000)); // 1s,2s,3s,4s (capped 5s)
+        }
 
-    private void EnsureLoaded()
+        if (!_loaded)
+            PatchHelper.Log(
+                $"[Cloud] Could not enumerate cloud files after {MaxRetries} attempts; "
+                    + "cloud sync will use local this session and retry next launch."
+            );
+    }
+
+    private bool TryLoadOnce()
     {
         if (_loaded)
-            return;
-        if (_retries >= MaxRetries)
-            return;
-        if (_retries > 0 && DateTimeOffset.UtcNow < _nextRetryTime)
-            return;
+            return true;
 
         lock (_loadLock)
         {
-            if (_loaded || _retries >= MaxRetries)
-                return;
-            if (_retries > 0 && DateTimeOffset.UtcNow < _nextRetryTime)
-                return;
+            if (_loaded)
+                return true;
 
             try
             {
                 LoadFileList();
                 _loaded = true;
+                return true;
             }
             catch (Exception ex)
             {
-                _retries++;
-                var backoffSeconds = Math.Pow(2, _retries);
-                _nextRetryTime = DateTimeOffset.UtcNow.AddSeconds(backoffSeconds);
-                PatchHelper.Log(
-                    $"[Cloud] Failed to enumerate cloud files (attempt {_retries}/{MaxRetries}): {ex.Message}"
-                );
-
-                if (_retries >= MaxRetries)
-                    PatchHelper.Log(
-                        "[Cloud] Max retries reached for cloud file enumeration this session."
-                    );
+                PatchHelper.Log($"[Cloud] Failed to enumerate cloud files: {ex.Message}");
+                return false;
             }
         }
     }
