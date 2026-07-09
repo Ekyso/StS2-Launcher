@@ -34,6 +34,24 @@ public class SteamKit2CloudSaveStore : ICloudSaveStore, ISaveStore, IDisposable
         _writeQueue = new CloudWriteQueue();
 
         Instance = this;
+
+        // Prewarm the cloud file list off the main thread. The game queries this store
+        // (FileExists/GetFileSize/GetLastModifiedTime/...) synchronously on its render
+        // thread during startup, and the enumeration is loaded lazily on first query —
+        // which stalls that thread on a blocking network round-trip. Kicking it off here
+        // overlaps the enumerate with the rest of startup, so by the time the first query
+        // arrives the list is usually already loaded and the call returns from cache.
+        Task.Run(() =>
+        {
+            try
+            {
+                _cache.Prewarm();
+            }
+            catch (Exception ex)
+            {
+                PatchHelper.Log($"[Cloud] Prewarm enumerate failed: {ex.Message}");
+            }
+        });
     }
 
     public void Flush(int timeoutMs = 5000)
@@ -234,6 +252,10 @@ public class SteamKit2CloudSaveStore : ICloudSaveStore, ISaveStore, IDisposable
     public string GetFullPath(string filename) => throw new NotImplementedException();
 
     public bool HasCloudFiles() => _cache.HasCloudFiles();
+
+    // The current game build added this to ICloudSaveStore. Reflect the launcher's
+    // own cloud-sync toggle so the game honours the user's setting.
+    public bool HasUserEnabledCloudSync() => STS2Mobile.Patches.LauncherPatches.CloudSyncEnabled;
 
     public void ForgetFile(string path) => _cache.ForgetFile(path);
 

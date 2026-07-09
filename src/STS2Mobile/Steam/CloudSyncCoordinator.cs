@@ -75,20 +75,38 @@ public static class CloudSyncCoordinator
             if (cloudExists && localExists)
             {
                 string localContent = local.ReadFile(path);
-                string cloudContent = await cloud.ReadFileAsync(path);
 
                 if (IsCorrupt(localContent))
                 {
                     PatchHelper.Log($"[Cloud] Sync: local {path} is corrupt, pulling from cloud");
                     BackupProgressFile(local, path);
-                    var cloudTime = cloud.GetLastModifiedTime(path);
-                    await local.WriteFileAsync(path, cloudContent);
-                    local.SetLastModifiedTime(path, cloudTime);
+                    var corruptCloudContent = await cloud.ReadFileAsync(path);
+                    var corruptCloudTime = cloud.GetLastModifiedTime(path);
+                    await local.WriteFileAsync(path, corruptCloudContent);
+                    local.SetLastModifiedTime(path, corruptCloudTime);
                     return;
                 }
 
+                // Fast path: the enumerate cache already knows the cloud file's size +
+                // mtime (no network). When they match the local file, contents are
+                // already in sync, so skip the download entirely. This is the big win —
+                // previously every unchanged save was re-downloaded just to compare,
+                // pulling the whole run history (~60 files) on every launch.
+                if (
+                    cloud.GetFileSize(path) == local.GetFileSize(path)
+                    && cloud.GetLastModifiedTime(path) == local.GetLastModifiedTime(path)
+                )
+                {
+                    return;
+                }
+
+                string cloudContent = await cloud.ReadFileAsync(path);
+
                 if (localContent == cloudContent)
                 {
+                    // Align local mtime to cloud so the fast path above short-circuits
+                    // this file on the next launch instead of re-downloading it.
+                    local.SetLastModifiedTime(path, cloud.GetLastModifiedTime(path));
                     PatchHelper.Log($"[Cloud] Sync: {path} identical, skipping");
                     return;
                 }

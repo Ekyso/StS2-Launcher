@@ -130,6 +130,11 @@ public class CloudFileCache
         EnsureLoaded();
     }
 
+    // Eagerly loads the file list if it isn't loaded yet. Intended to be called from a
+    // background thread at construction time so the game's first synchronous query on the
+    // main thread finds the list already cached instead of stalling on the enumeration.
+    public void Prewarm() => EnsureLoaded();
+
     private void EnsureLoaded()
     {
         if (_loaded)
