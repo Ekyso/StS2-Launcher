@@ -79,10 +79,11 @@ public static class AppLifecyclePatches
             var node = (Node)__instance;
             node.GetTree().Paused = true;
 
-            // Flush pending cloud writes before the OS may kill the process
+            // Flush pending cloud writes before the OS may kill the process. Bounded
+            // and write-queue-only so it can't hang the render thread (ANR) on pause.
             try
             {
-                SteamKit2CloudSaveStore.Instance?.Flush(5000);
+                SteamKit2CloudSaveStore.Instance?.FlushWrites(2000);
             }
             catch (Exception ex)
             {
@@ -244,7 +245,7 @@ public static class AppLifecyclePatches
         {
             try
             {
-                SteamKit2CloudSaveStore.Instance?.Flush(5000);
+                SteamKit2CloudSaveStore.Instance?.FlushWrites(3000);
             }
             catch { }
 

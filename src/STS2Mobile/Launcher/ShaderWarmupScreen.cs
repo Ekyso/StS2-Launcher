@@ -223,15 +223,21 @@ public class ShaderWarmupScreen : Control
         return sprite;
     }
 
+    private int _scanProcessed;
+
     private async Task<List<(string path, Material mat)>> CollectMaterialsAsync()
     {
-        var materials = new Dictionary<string, Material>();
+        // Deduplicate by shader as we go: many materials share one shader program
+        // with different params, so keying on the shader bounds memory — we never
+        // hold thousands of redundant materials (and their textures) alive at once.
+        var unique = new Dictionary<string, (string path, Material mat)>();
 
-        CollectFromDirectory("res://", materials);
+        _scanProcessed = 0;
+        await CollectFromDirectoryAsync("res://", unique);
         PatchHelper.Log(
-            $"[ShaderWarmup] Found {materials.Count} materials from loose resource files"
+            $"[ShaderWarmup] Scanned {_scanProcessed} loose resource files, {unique.Count} unique shaders so far"
         );
-        _detailLabel.Text = $"Found {materials.Count} materials...";
+        _detailLabel.Text = $"Found {unique.Count} shaders...";
         await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
         var scenePaths = new List<string>();
@@ -248,7 +254,7 @@ public class ShaderWarmupScreen : Control
                     ResourceLoader.CacheMode.Reuse
                 );
                 if (packed != null)
-                    ExtractMaterialsFromSceneState(packed, scenePaths[i], materials);
+                    ExtractMaterialsFromSceneState(packed, scenePaths[i], unique);
             }
             catch (Exception ex)
             {
@@ -257,25 +263,16 @@ public class ShaderWarmupScreen : Control
                 );
             }
 
-            if (i % 50 == 0)
+            if (i % 25 == 0)
             {
-                _detailLabel.Text = $"Scanning scenes... {i} / {scenePaths.Count}";
+                _detailLabel.Text =
+                    $"Scanning scenes... {i} / {scenePaths.Count} ({unique.Count} shaders)";
                 _progressBar.Value = (double)i / scenePaths.Count * 50;
                 await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
             }
         }
 
-        // Deduplicate by shader since many materials share the same program with different params.
-        var unique = new Dictionary<string, (string path, Material mat)>();
-        foreach (var (path, mat) in materials)
-        {
-            var shaderKey = GetShaderKey(mat);
-            unique.TryAdd(shaderKey, (path, mat));
-        }
-
-        PatchHelper.Log(
-            $"[ShaderWarmup] {materials.Count} total materials, {unique.Count} unique shaders"
-        );
+        PatchHelper.Log($"[ShaderWarmup] {unique.Count} unique shaders total");
         return unique.Values.ToList();
     }
 
@@ -288,8 +285,19 @@ public class ShaderWarmupScreen : Control
         return mat.ResourcePath ?? mat.GetRid().ToString();
     }
 
-    private void CollectFromDirectory(string dirPath, Dictionary<string, Material> materials)
+    // Recursively collects material/shader resources, yielding to the frame loop
+    // periodically so the warmup screen stays responsive — the previous synchronous
+    // walk of the whole res:// tree froze the UI (no frames) until it finished.
+    private async Task CollectFromDirectoryAsync(
+        string dirPath,
+        Dictionary<string, (string path, Material mat)> unique
+    )
     {
+        var subDirs = new List<string>();
+        var files = new List<string>();
+
+        // Enumerate first and close the handle before any awaits so we never hold
+        // a DirAccess open across a frame boundary or the recursive descent.
         try
         {
             using var dir = DirAccess.Open(dirPath);
@@ -303,78 +311,15 @@ public class ShaderWarmupScreen : Control
                 if (fileName == "." || fileName == "..")
                     continue;
 
-                var fullPath = $"{dirPath}/{fileName}";
-
                 if (dir.CurrentIsDir())
                 {
                     if (fileName == "debug")
                         continue;
-                    CollectFromDirectory(fullPath, materials);
-                    continue;
+                    subDirs.Add($"{dirPath}/{fileName}");
                 }
-
-                var cleanName = fileName.Replace(".remap", "");
-                var cleanPath = $"{dirPath}/{cleanName}";
-
-                if (
-                    !cleanName.EndsWith(".tres")
-                    && !cleanName.EndsWith(".gdshader")
-                    && !cleanName.EndsWith(".material")
-                )
-                    continue;
-
-                if (materials.ContainsKey(cleanPath))
-                    continue;
-
-                try
+                else
                 {
-                    if (!ResourceLoader.Exists(cleanPath))
-                        continue;
-
-                    // Load .tres with type hints to avoid errors from non-material resources.
-                    if (cleanName.EndsWith(".tres"))
-                    {
-                        var mat =
-                            ResourceLoader.Load(
-                                cleanPath,
-                                "Material",
-                                ResourceLoader.CacheMode.Reuse
-                            ) as Material;
-                        if (mat != null)
-                            materials[cleanPath] = mat;
-                        else
-                        {
-                            var shader =
-                                ResourceLoader.Load(
-                                    cleanPath,
-                                    "Shader",
-                                    ResourceLoader.CacheMode.Reuse
-                                ) as Shader;
-                            if (shader != null)
-                            {
-                                var shaderMat = new ShaderMaterial();
-                                shaderMat.Shader = shader;
-                                materials[cleanPath] = shaderMat;
-                            }
-                        }
-                        continue;
-                    }
-
-                    var res = ResourceLoader.Load(cleanPath, null, ResourceLoader.CacheMode.Reuse);
-                    if (res is Material resMat)
-                    {
-                        materials[cleanPath] = resMat;
-                    }
-                    else if (res is Shader resShader)
-                    {
-                        var shaderMat = new ShaderMaterial();
-                        shaderMat.Shader = resShader;
-                        materials[cleanPath] = shaderMat;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    PatchHelper.Log($"[ShaderWarmup] Failed to load {cleanPath}: {ex.Message}");
+                    files.Add(fileName);
                 }
             }
             dir.ListDirEnd();
@@ -382,7 +327,103 @@ public class ShaderWarmupScreen : Control
         catch (Exception ex)
         {
             PatchHelper.Log($"[ShaderWarmup] Failed to enumerate {dirPath}: {ex.Message}");
+            return;
         }
+
+        foreach (var fileName in files)
+        {
+            ProcessResourceFile(dirPath, fileName, unique);
+            _scanProcessed++;
+
+            if (_scanProcessed % 40 == 0)
+            {
+                _detailLabel.Text =
+                    $"Scanning resources... {_scanProcessed} files ({unique.Count} shaders)";
+                await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            }
+        }
+
+        foreach (var sub in subDirs)
+            await CollectFromDirectoryAsync(sub, unique);
+    }
+
+    private static void ProcessResourceFile(
+        string dirPath,
+        string fileName,
+        Dictionary<string, (string path, Material mat)> unique
+    )
+    {
+        var cleanName = fileName.Replace(".remap", "");
+        var cleanPath = $"{dirPath}/{cleanName}";
+
+        if (
+            !cleanName.EndsWith(".tres")
+            && !cleanName.EndsWith(".gdshader")
+            && !cleanName.EndsWith(".material")
+        )
+            return;
+
+        try
+        {
+            if (!ResourceLoader.Exists(cleanPath))
+                return;
+
+            // A .gdshader's shader key is its own path, so we can dedup by path and
+            // skip loading it entirely when a material already covers this program.
+            if (cleanName.EndsWith(".gdshader"))
+            {
+                if (unique.ContainsKey(cleanPath))
+                    return;
+                if (
+                    ResourceLoader.Load(cleanPath, "Shader", ResourceLoader.CacheMode.Reuse)
+                    is Shader shader
+                )
+                    unique.TryAdd(cleanPath, (cleanPath, new ShaderMaterial { Shader = shader }));
+                return;
+            }
+
+            // Load .tres with type hints to avoid errors from non-material resources.
+            if (cleanName.EndsWith(".tres"))
+            {
+                if (
+                    ResourceLoader.Load(cleanPath, "Material", ResourceLoader.CacheMode.Reuse)
+                    is Material mat
+                )
+                {
+                    AddMaterial(unique, cleanPath, mat);
+                    return;
+                }
+                if (
+                    ResourceLoader.Load(cleanPath, "Shader", ResourceLoader.CacheMode.Reuse)
+                    is Shader shader
+                )
+                    AddMaterial(unique, cleanPath, new ShaderMaterial { Shader = shader });
+                return;
+            }
+
+            var res = ResourceLoader.Load(cleanPath, null, ResourceLoader.CacheMode.Reuse);
+            if (res is Material resMat)
+                AddMaterial(unique, cleanPath, resMat);
+            else if (res is Shader resShader)
+                AddMaterial(unique, cleanPath, new ShaderMaterial { Shader = resShader });
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log($"[ShaderWarmup] Failed to load {cleanPath}: {ex.Message}");
+        }
+    }
+
+    // Adds a material under its shader key, dropping duplicates that share a shader
+    // program already collected (keeps a single instance per program alive).
+    private static void AddMaterial(
+        Dictionary<string, (string path, Material mat)> unique,
+        string path,
+        Material mat
+    )
+    {
+        if (mat == null)
+            return;
+        unique.TryAdd(GetShaderKey(mat), (path, mat));
     }
 
     private static void CollectScenePaths(string dirPath, List<string> paths)
@@ -429,7 +470,7 @@ public class ShaderWarmupScreen : Control
     private static void ExtractMaterialsFromSceneState(
         PackedScene packed,
         string scenePath,
-        Dictionary<string, Material> materials
+        Dictionary<string, (string path, Material mat)> unique
     )
     {
         var state = packed.GetState();
@@ -452,17 +493,13 @@ public class ShaderWarmupScreen : Control
                 {
                     var val = state.GetNodePropertyValue(n, p);
                     if (val.Obj is Material mat)
-                    {
-                        var key = $"{scenePath}#node{n}#{propName}";
-                        materials.TryAdd(key, mat);
-                    }
+                        AddMaterial(unique, $"{scenePath}#node{n}#{propName}", mat);
                     else if (val.Obj is Shader shader)
-                    {
-                        var shaderMat = new ShaderMaterial();
-                        shaderMat.Shader = shader;
-                        var key = $"{scenePath}#node{n}#{propName}";
-                        materials.TryAdd(key, shaderMat);
-                    }
+                        AddMaterial(
+                            unique,
+                            $"{scenePath}#node{n}#{propName}",
+                            new ShaderMaterial { Shader = shader }
+                        );
                 }
                 catch (Exception ex)
                 {

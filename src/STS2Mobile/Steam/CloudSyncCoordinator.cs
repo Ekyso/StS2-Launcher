@@ -75,20 +75,39 @@ public static class CloudSyncCoordinator
             if (cloudExists && localExists)
             {
                 string localContent = local.ReadFile(path);
-                string cloudContent = await cloud.ReadFileAsync(path);
 
                 if (IsCorrupt(localContent))
                 {
                     PatchHelper.Log($"[Cloud] Sync: local {path} is corrupt, pulling from cloud");
                     BackupProgressFile(local, path);
-                    var cloudTime = cloud.GetLastModifiedTime(path);
-                    await local.WriteFileAsync(path, cloudContent);
-                    local.SetLastModifiedTime(path, cloudTime);
+                    var corruptCloudContent = await cloud.ReadFileAsync(path);
+                    var corruptCloudTime = cloud.GetLastModifiedTime(path);
+                    await local.WriteFileAsync(path, corruptCloudContent);
+                    local.SetLastModifiedTime(path, corruptCloudTime);
                     return;
                 }
 
+                // Fast path: the enumerate cache already knows the cloud file's size +
+                // mtime (no network). When they match the local file, contents are
+                // already in sync, so skip the download entirely. This is the big win —
+                // previously every unchanged save was re-downloaded just to compare,
+                // pulling the whole run history (~60 files) on every launch.
+                if (
+                    cloud.GetFileSize(path) == local.GetFileSize(path)
+                    && cloud.GetLastModifiedTime(path) == local.GetLastModifiedTime(path)
+                )
+                {
+                    PatchHelper.Log($"[Cloud] Sync: {path} unchanged (size+mtime match), skip download");
+                    return;
+                }
+
+                string cloudContent = await cloud.ReadFileAsync(path);
+
                 if (localContent == cloudContent)
                 {
+                    // Align local mtime to cloud so the fast path above short-circuits
+                    // this file on the next launch instead of re-downloading it.
+                    local.SetLastModifiedTime(path, cloud.GetLastModifiedTime(path));
                     PatchHelper.Log($"[Cloud] Sync: {path} identical, skipping");
                     return;
                 }
@@ -140,6 +159,10 @@ public static class CloudSyncCoordinator
         var cloudStore =
             SteamKit2CloudSaveStore.Instance
             ?? new SteamKit2CloudSaveStore(accountName, refreshToken);
+
+        // Queries no longer lazily load the cloud list on the calling thread, so a
+        // user-initiated push must warm it first (background thread, blocking is fine).
+        cloudStore.EnsureCacheReady();
 
         var paths = GetSaveFilePaths(localStore);
         PatchHelper.Log($"[Cloud] Push: starting ({paths.Count} files)");
@@ -196,6 +219,10 @@ public static class CloudSyncCoordinator
             SteamKit2CloudSaveStore.Instance
             ?? new SteamKit2CloudSaveStore(accountName, refreshToken);
 
+        // Pull enumerates cloud files, so the list must be warm; queries no longer load
+        // it lazily. Warm it here (background thread, blocking is fine for a user action).
+        cloudStore.EnsureCacheReady();
+
         var paths = GetSaveFilePaths(cloudStore);
         PatchHelper.Log($"[Cloud] Pull: starting ({paths.Count} files)");
 
@@ -220,6 +247,7 @@ public static class CloudSyncCoordinator
 
         int downloaded = 0;
         int skipped = 0;
+        int unchanged = 0;
         foreach (var path in paths)
         {
             try
@@ -229,6 +257,21 @@ public static class CloudSyncCoordinator
                     skipped++;
                     continue;
                 }
+
+                // Skip the download when local already matches (size + mtime). A metadata
+                // match reliably means identical content (the mobile-mtime caveat is the
+                // reverse: mtime drifting while content is unchanged), so a manual pull
+                // needn't re-fetch a file that's already in sync.
+                if (
+                    localStore.FileExists(path)
+                    && cloudStore.GetFileSize(path) == localStore.GetFileSize(path)
+                    && cloudStore.GetLastModifiedTime(path) == localStore.GetLastModifiedTime(path)
+                )
+                {
+                    unchanged++;
+                    continue;
+                }
+
                 PatchHelper.Log($"[Cloud] Pull: downloading {path}");
                 var pullTime = cloudStore.GetLastModifiedTime(path);
                 string content = await cloudStore.ReadFileAsync(path);
@@ -243,7 +286,9 @@ public static class CloudSyncCoordinator
             }
         }
 
-        PatchHelper.Log($"[Cloud] Pull complete: {downloaded} downloaded, {skipped} not in cloud");
+        PatchHelper.Log(
+            $"[Cloud] Pull complete: {downloaded} downloaded, {unchanged} unchanged (skipped), {skipped} not in cloud"
+        );
     }
 
     public static List<string> GetSaveFilePaths(ISaveStore store)
