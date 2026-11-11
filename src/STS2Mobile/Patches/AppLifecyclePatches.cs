@@ -47,8 +47,50 @@ public static class AppLifecyclePatches
         );
     }
 
+    // FMOD Studio only applies bus/volume changes on its next update(), which normally
+    // runs once per frame. Android stops the Godot main loop as soon as the activity is
+    // paused, so the SetMasterVol(0) call below (and the game's own MuteInBackground
+    // tween) never reaches the mixer and music/ambience keep playing in the background.
+    // Mute FMOD directly and force an update so the change is applied immediately.
+    private static void SetFmodBackgroundMute(bool mute)
+    {
+        try
+        {
+            var fmod = Engine.GetSingleton("FmodServer");
+            if (fmod == null)
+            {
+                PatchHelper.Log("[Audio] FmodServer singleton not found");
+                return;
+            }
+
+            if (mute)
+            {
+                fmod.Call("mute_all_events");
+                if (fmod.HasMethod("update"))
+                {
+                    fmod.Call("update");
+                    PatchHelper.Log("[Audio] FMOD muted, update forced");
+                }
+                else
+                {
+                    PatchHelper.Log("[Audio] FMOD muted (FmodServer.update not available)");
+                }
+            }
+            else
+            {
+                fmod.Call("unmute_all_events");
+                PatchHelper.Log("[Audio] FMOD unmuted");
+            }
+        }
+        catch (Exception ex)
+        {
+            PatchHelper.Log("[Audio] FMOD background toggle failed: " + ex.Message);
+        }
+    }
+
     public static void EnterBackgroundPostfix(object __instance)
     {
+        SetFmodBackgroundMute(true);
         try
         {
             try
@@ -100,6 +142,7 @@ public static class AppLifecyclePatches
     // Opens the pause menu on resume so the player can re-orient before gameplay continues.
     public static bool ExitBackgroundPrefix(object __instance)
     {
+        SetFmodBackgroundMute(false);
         try
         {
             var node = (Node)__instance;
